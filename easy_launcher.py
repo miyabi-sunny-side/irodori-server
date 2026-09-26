@@ -27,13 +27,11 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--check", action="store_true")
     parser.add_argument("--backend", choices=["cpu", "cu128", "xpu"], default="cpu")
+    parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=7860)
-    parser.add_argument("--no-browser", action="store_true")
     args = parser.parse_args()
     if not os.environ.get("EASY_IRODORI_ROOT"):
-        raise RuntimeError("Please launch Easy_irodori_tts.bat so local storage settings are applied.")
-    # Retain the handle: closing it removes this directory from Windows DLL lookup.
-    dll_handle = os.add_dll_directory(os.environ["EASY_FFMPEG_BIN"]) if os.name == "nt" else None
+        raise RuntimeError("Please launch irodori.sh so local storage settings are applied.")
     sys.path.insert(0, str(REPO))
     os.chdir(ROOT / "outputs")
     if args.check:
@@ -42,9 +40,9 @@ def main():
         import torchcodec
         import soundfile
         if args.backend == "cu128" and not torch.cuda.is_available():
-            raise RuntimeError("CUDA is unavailable. Check the NVIDIA driver or restart with -Backend cpu.")
+            raise RuntimeError("CUDA is unavailable. Check the NVIDIA driver or restart with --backend cpu.")
         if args.backend == "xpu" and not torch.xpu.is_available():
-            raise RuntimeError("Intel XPU is unavailable. Check the driver or use -Backend cpu.")
+            raise RuntimeError("Intel XPU is unavailable. Check the driver or use --backend cpu.")
         load_ui()
         print(f"Dependency check passed. Python: {sys.executable}; PyTorch: {torch.__version__}")
         return
@@ -53,10 +51,10 @@ def main():
     demo = build_ui(ui)
     demo.queue(default_concurrency_limit=1)
     demo.launch(
-        server_name="127.0.0.1",
+        server_name=args.host,
         server_port=args.port,
         share=False,
-        inbrowser=not args.no_browser,
+        inbrowser=False,
         css=CSS,
     )
 

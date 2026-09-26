@@ -1,0 +1,7 @@
+/Irodori-TTS/
+/.venv/
+/outputs/
+/temp/
+/config/backend.txt
+/config/reading_dictionary.json*
+__pycache__/

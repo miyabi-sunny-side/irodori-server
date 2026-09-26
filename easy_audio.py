@@ -1,6 +1,5 @@
 """Pitch-preserving tempo processing; playback gain never changes saved audio."""
 import math
-import os
 from pathlib import Path
 import subprocess
 import uuid
@@ -13,17 +12,16 @@ def change_speed(source, speed):
     if speed == 1.0:
         return source
     source = Path(source).resolve()
-    ffmpeg = Path(os.environ["EASY_FFMPEG_BIN"]) / "ffmpeg.exe"
     target = source.with_name(f"{source.stem}_speed_{speed:.2f}_{uuid.uuid4().hex[:8]}.wav")
     partial = target.with_suffix(".partial.wav")
     try:
         # atempo preserves pitch and does not apply playback gain or normalization.
         subprocess.run(
-            [str(ffmpeg), "-hide_banner", "-loglevel", "error", "-nostdin", "-n",
+            ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-n",
              "-i", str(source), "-map", "0:a:0", "-af", f"atempo={speed:.4f}",
              "-c:a", "pcm_s24le", str(partial)],
             check=True, capture_output=True, text=True, encoding="utf-8", errors="replace",
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), timeout=300,
+            timeout=300,
         )
         partial.replace(target)
     except subprocess.CalledProcessError as exc:
