@@ -47,7 +47,6 @@ JSON の API は `/api` 以下にあります。エラーは `4xx`/`5xx` と `{"
 
 - 省略した項目は既定値になります。`model_device`・`codec_device` は `/api/info` の `devices` の先頭、
   精度はその機器の `precisions` の先頭です。bf16 を扱える機器 (cuda・xpu) では bf16 が先頭です。
-- cuda では torch.compile を使います (LoRA を指定した要求を除く)。最初の生成はコンパイルのため時間がかかります。
 - `mode`: `design` (caption を使う)・`clone` (`reference_ids` を使う)・`both`・`auto` (文章だけ)。
   使わない側の caption・参照音声は無視します。`clone`・`both` は参照音声が 1 件以上必要です。
 - 範囲: `speed` 0.75〜1.5、`num_steps` 1〜120、`num_candidates` 1〜`max_candidates`、

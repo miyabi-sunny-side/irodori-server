@@ -343,7 +343,6 @@ async fn synthesize(
         .call(&json!({
             "op": "generate",
             "params": request.worker_params(text_applied, references),
-            "compile": request.compile(),
             "out_dir": scratch,
         }))
         .await

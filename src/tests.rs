@@ -149,13 +149,6 @@ async fn speech_returns_one_recorded_wav() {
         "one candidate only"
     );
     assert_eq!(listed["generations"][0]["id"].to_string(), id);
-    assert!(
-        listed["generations"][0]["log"]
-            .as_str()
-            .unwrap()
-            .contains("\"compile\": false"),
-        "cpu does not compile"
-    );
     let stored = server
         .call("GET", &format!("/api/generations/{id}/audio"), None)
         .await;

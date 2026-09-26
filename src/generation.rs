@@ -303,13 +303,6 @@ impl GenerateRequest {
     }
 }
 
-impl GenerateRequest {
-    /// `torch.compile` is used on CUDA; upstream cannot combine it with a `LoRA` adapter.
-    pub fn compile(&self) -> bool {
-        self.model_device == "cuda" && self.lora_adapter_raw.trim().is_empty()
-    }
-}
-
 /// Puts bf16 first wherever a device offers it, making it the default precision.
 pub fn prefer_bf16(runtime: &mut Runtime) {
     for precisions in runtime.precisions.values_mut() {
@@ -506,18 +499,6 @@ mod tests {
         ];
         expected.sort_unstable();
         assert_eq!(keys, expected);
-    }
-
-    #[test]
-    fn compile_only_on_cuda_without_lora() {
-        let mut req = request();
-        assert!(!req.compile(), "cpu");
-        req.model_device = "cuda".into();
-        assert!(req.compile());
-        req.lora_adapter_raw = "/loras/voice".into();
-        assert!(!req.compile(), "lora");
-        req.lora_adapter_raw = "  ".into();
-        assert!(req.compile(), "blank lora");
     }
 
     #[test]
