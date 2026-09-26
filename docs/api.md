@@ -88,7 +88,9 @@ curl -X POST http://<host>:<port>/api/speech -H 'content-type: application/json'
   "mode": "design", "caption": "...", "reference_ids": [], "model": "Aratako/Irodori-TTS-v4.1-Small",
   "seed": "1989088249105138954", "speed": 1.0, "params": {<生成要求そのもの>},
   "audio_url": "/api/generations/12/audio",
-  "saved": false
+  "saved": false,
+  "character": "ずんだ",
+  "favorite": false
 }
 ```
 
@@ -100,8 +102,10 @@ curl -X POST http://<host>:<port>/api/speech -H 'content-type: application/json'
 
 - `GET /api/generations/{id}` → `Generation`
 - `GET /api/generations/{id}/audio` → `audio/wav`。`?download=1` で添付ファイルとして返します。
-- `saved` はお手本に保存した生成で `true` になります。一括削除はこの生成を残します。
-- `POST /api/generations/cleanup` はお手本に保存していない生成の記録と WAV を消し、`{"deleted": 5}` を返します。
+- `saved` はお手本に保存した生成で `true` になります。
+- `character` は、使ったお手本がすべて同じキャラクターのときに入ります。それ以外は `null` です。
+- `favorite` は ★ の有無です。`PUT /api/generations/{id}/favorite` `{"favorite": true}` で切り替え、更新後の `Generation` を返します。
+- `POST /api/generations/cleanup` は、★ もお手本への保存もない生成の記録と WAV を消し、`{"deleted": 5}` を返します。
 - `DELETE /api/generations/{id}` → `204`。記録を消してから WAV を消します。
   WAV を消せなかった場合は `file_errors` に残ります。
 
@@ -121,6 +125,27 @@ curl -X POST http://<host>:<port>/api/speech -H 'content-type: application/json'
 
 - `DELETE /api/references/{id}` → `204`。記録を消してからファイルを消します。
 - お手本の `id` は生成要求の `reference_ids` にそのまま使えます。
+
+## まとめて生成
+
+キャラクターのお手本を使い、台詞を 1 行 1 本で順に生成します。できた音声は通常の生成と同じく履歴に記録されます。
+
+```json
+POST /api/batches
+{"character": "ずんだ", "lines": "おはよう。\nこんにちは。", "settings": {"num_steps": 40, "caption": "..."}}
+```
+
+- `settings` は生成要求と同じ項目です (省略可)。文章・候補数 (1)・参照音声は行ごとに決まります。
+  声の作り方がお手本を使わない指定のときはボイスクローンにします。参照音声はそのキャラクターのお手本 (古い順に 16 件まで) です。
+- 台詞は空行を除いて 100 行までです。応答は `202` と `{"id": "...", "total": 2}` です。
+- 生成はサーバーの中で進むため、ブラウザを閉じても止まりません。失敗した行は飛ばして次へ進みます。
+- `GET /api/batches/{id}` で進み具合を返します。`GET /api/batches` は最近の 20 件です。
+  進み具合はサーバーの再起動で消えますが、生成した音声は履歴に残ります。
+
+  ```json
+  {"id": "...", "character": "ずんだ", "total": 3, "done": 3, "generation_ids": [40, 41],
+   "failed": [{"line": "...", "error": "..."}], "finished": true}
+  ```
 
 ## 参照音声
 

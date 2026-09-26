@@ -21,7 +21,7 @@ use axum::{
     extract::{DefaultBodyLimit, Multipart, Path as UrlPath, Query, Request, State},
     http::{StatusCode, Uri, header},
     response::{IntoResponse, Response},
-    routing::{delete, get, post},
+    routing::{delete, get, post, put},
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -69,6 +69,19 @@ struct Inner {
     data_dir: PathBuf,
     worker: Worker,
     info: tokio::sync::Mutex<Option<(Runtime, Vec<Value>)>>,
+    /// Batch progress lives in memory; the generations themselves are recorded as usual.
+    batches: Mutex<Vec<Batch>>,
+}
+
+#[derive(Clone, serde::Serialize)]
+struct Batch {
+    id: String,
+    character: String,
+    total: usize,
+    done: usize,
+    generation_ids: Vec<i64>,
+    failed: Vec<Value>,
+    finished: bool,
 }
 
 impl AppState {
@@ -85,6 +98,7 @@ impl AppState {
             data_dir: config.data_dir,
             worker: config.worker,
             info: tokio::sync::Mutex::new(None),
+            batches: Mutex::new(Vec::new()),
         })))
     }
 
@@ -123,6 +137,13 @@ impl AppState {
         Ok(info.clone().expect("filled above"))
     }
 
+    fn batches(&self) -> std::sync::MutexGuard<'_, Vec<Batch>> {
+        self.0
+            .batches
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     fn db(&self) -> std::sync::MutexGuard<'_, Db> {
         self.0
             .db
@@ -145,6 +166,9 @@ pub fn app(state: AppState) -> Router {
         .route("/generations/{id}/audio", get(generation_audio))
         .route("/generations/{id}/reference", post(save_reference))
         .route("/generations/cleanup", post(cleanup_generations))
+        .route("/generations/{id}/favorite", put(set_favorite))
+        .route("/batches", get(list_batches).post(start_batch))
+        .route("/batches/{id}", get(get_batch))
         .route("/references", get(list_references))
         .route(
             "/references",
@@ -291,7 +315,7 @@ async fn run_generation(
         .validate(&runtime)
         .map_err(|message| AppError::new(StatusCode::BAD_REQUEST, message))?;
     let data = state.0.data_dir.clone();
-    let (text_applied, references) = {
+    let (text_applied, references, character) = {
         let db = state.db();
         let text = if request.dictionary_enabled {
             dictionary::apply(&request.text, &db.dictionary()?)
@@ -299,18 +323,20 @@ async fn run_generation(
             request.text.clone()
         };
         let mut references = Vec::new();
+        let mut characters = Vec::new();
         if request.uses_references() {
             for id in &request.reference_ids {
-                let path = db.reference_path(*id)?.ok_or_else(|| {
+                let (path, character) = db.reference_entry(*id)?.ok_or_else(|| {
                     AppError::new(
                         StatusCode::BAD_REQUEST,
                         "お手本の音声が見つかりません。もう一度追加してください。",
                     )
                 })?;
                 references.push(data.join(path).display().to_string());
+                characters.push(character);
             }
         }
-        (text, references)
+        (text, references, generation::shared_character(&characters))
     };
 
     let batch = format!(
@@ -327,6 +353,7 @@ async fn run_generation(
         &references,
         &batch,
         &scratch,
+        character,
     )
     .await;
     let _ = tokio::fs::remove_dir_all(&scratch).await;
@@ -340,6 +367,7 @@ async fn synthesize(
     references: &[String],
     batch: &str,
     scratch: &Path,
+    character: Option<String>,
 ) -> ApiResult<(Vec<Generation>, String)> {
     let reply = state
         .0
@@ -408,6 +436,8 @@ async fn synthesize(
             path: relative,
             audio_url: String::new(),
             saved: false,
+            character: character.clone(),
+            favorite: false,
         });
     }
     let saved = state.db().insert_generations(&rows);
@@ -611,6 +641,131 @@ async fn cleanup_generations(State(state): State<AppState>) -> ApiResult<Json<Va
         remove_recorded(&state, path).await?;
     }
     Ok(Json(json!({"deleted": paths.len()})))
+}
+
+#[derive(Deserialize)]
+struct FavoriteInput {
+    favorite: bool,
+}
+
+async fn set_favorite(
+    State(state): State<AppState>,
+    UrlPath(id): UrlPath<i64>,
+    Json(input): Json<FavoriteInput>,
+) -> ApiResult<Json<Generation>> {
+    if !state.db().set_favorite(id, input.favorite)? {
+        return Err(AppError::new(
+            StatusCode::NOT_FOUND,
+            "生成の記録が見つかりません。",
+        ));
+    }
+    find_generation(&state, id).map(Json)
+}
+
+#[derive(Deserialize)]
+struct BatchInput {
+    #[serde(default)]
+    character: String,
+    #[serde(default)]
+    lines: String,
+    /// Generation settings as for `/api/generate`; text, candidates and references are set per line.
+    #[serde(default)]
+    settings: Value,
+}
+
+async fn start_batch(
+    State(state): State<AppState>,
+    Json(input): Json<BatchInput>,
+) -> ApiResult<(StatusCode, Json<Value>)> {
+    let bad = |message: String| AppError::new(StatusCode::BAD_REQUEST, message);
+    let lines = generation::batch_lines(&input.lines).map_err(bad)?;
+    let settings = if input.settings.is_null() {
+        json!({})
+    } else {
+        input.settings
+    };
+    let mut template = parse_request(&state, settings).await?;
+    if !template.uses_references() {
+        template.mode = "clone".into();
+    }
+    let mut reference_ids = state.db().character_references(&input.character)?;
+    reference_ids.truncate(generation::MAX_REFERENCES);
+    if reference_ids.is_empty() {
+        return Err(bad(
+            "このキャラクターのお手本がありません。生成履歴からお手本に保存してください。".into(),
+        ));
+    }
+    template.reference_ids = reference_ids;
+    template.num_candidates = 1;
+    template.text = lines[0].clone();
+    let (runtime, _) = state.runtime().await?;
+    template.validate(&runtime).map_err(bad)?;
+
+    let id = uuid::Uuid::new_v4().simple().to_string();
+    let batch = Batch {
+        id: id.clone(),
+        character: input.character.clone(),
+        total: lines.len(),
+        done: 0,
+        generation_ids: Vec::new(),
+        failed: Vec::new(),
+        finished: false,
+    };
+    {
+        let mut batches = state.batches();
+        batches.insert(0, batch);
+        batches.truncate(20);
+    }
+    tokio::spawn(run_batch(state, id.clone(), template, lines.clone()));
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(json!({"id": id, "total": lines.len()})),
+    ))
+}
+
+/// Generates the lines one by one, recording progress; the batch continues after a failed line.
+async fn run_batch(state: AppState, id: String, template: GenerateRequest, lines: Vec<String>) {
+    for line in lines {
+        let request = GenerateRequest {
+            text: line.clone(),
+            ..template.clone()
+        };
+        let result = run_generation(state.clone(), request).await;
+        let mut batches = state.batches();
+        let Some(batch) = batches.iter_mut().find(|b| b.id == id) else {
+            return;
+        };
+        batch.done += 1;
+        match result {
+            Ok((generations, _)) => batch
+                .generation_ids
+                .extend(generations.iter().map(|g| g.id)),
+            Err(error) => batch
+                .failed
+                .push(json!({"line": line, "error": error.message})),
+        }
+    }
+    if let Some(batch) = state.batches().iter_mut().find(|b| b.id == id) {
+        batch.finished = true;
+    }
+}
+
+async fn list_batches(State(state): State<AppState>) -> Json<Value> {
+    Json(json!({"batches": *state.batches()}))
+}
+
+async fn get_batch(
+    State(state): State<AppState>,
+    UrlPath(id): UrlPath<String>,
+) -> ApiResult<Json<Value>> {
+    let batches = state.batches();
+    let batch = batches.iter().find(|b| b.id == id).ok_or_else(|| {
+        AppError::new(
+            StatusCode::NOT_FOUND,
+            "まとめて生成の記録が見つかりません。",
+        )
+    })?;
+    Ok(Json(json!(batch)))
 }
 
 async fn upload_reference(

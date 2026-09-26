@@ -24,6 +24,10 @@ for (const viewport of [
       await mockBackend(page, {
         generations: [
           generation(2, LONG_TEXT, { speed: 1.25, saved: true }),
+          generation(11, "星の声", {
+            character: "とても長いキャラクター名".repeat(4),
+            favorite: true,
+          }),
           ...Array.from({ length: 8 }, (_, i) =>
             generation(3 + i, `音声 ${i}`),
           ),
@@ -32,6 +36,21 @@ for (const viewport of [
           savedReference(1, "あかり", 2),
           savedReference(2, "あかり", 3),
           savedReference(3, "とても長いキャラクター名".repeat(4), 4),
+        ],
+        batches: [
+          {
+            id: "batch-1",
+            character: "とても長いキャラクター名".repeat(4),
+            total: 3,
+            done: 3,
+            generation_ids: [11],
+            failed: [
+              { line: LONG_TEXT, error: "生成できませんでした。" },
+              { line: "短い台詞", error: "生成できませんでした。" },
+            ],
+            finished: true,
+            pending: [],
+          },
         ],
         dictionary: [
           { word: "Irodori", reading: "いろどり" },
@@ -66,7 +85,14 @@ for (const viewport of [
       await expect(page.locator("audio.player")).toBeVisible();
       await page.getByText("詳細設定（通常は変更不要）").click();
 
-      for (const path of ["/", "/dictionary", "/history", "/references", "/credits"]) {
+      for (const path of [
+        "/",
+        "/dictionary",
+        "/history",
+        "/references",
+        "/batch",
+        "/credits",
+      ]) {
         if (path !== "/") {
           await page.goto(path);
           await expect(page.locator("main")).not.toBeEmpty();

@@ -16,6 +16,7 @@ export const routes: RouteDef[] = [
   { pattern: /^\/history$/, params: [], title: "生成履歴" },
   { pattern: /^\/credits$/, params: [], title: "クレジット・利用条件" },
   { pattern: /^\/references$/, params: [], title: "お手本" },
+  { pattern: /^\/batch$/, params: [], title: "まとめて生成" },
 ];
 
 export function matchRoute(pathname: string): RouteMatch {

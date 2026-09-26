@@ -71,6 +71,20 @@ interface Generation {
   speed: number;
   audio_url: string;
   saved: boolean;
+  character: string | null;
+  favorite: boolean;
+}
+
+export interface MockBatch {
+  id: string;
+  character: string;
+  total: number;
+  done: number;
+  generation_ids: number[];
+  failed: { line: string; error: string }[];
+  finished: boolean;
+  /** Lines still to voice; one is voiced per GET, like a slow server. */
+  pending: string[];
 }
 
 export interface SavedReference {
@@ -88,6 +102,9 @@ export interface Backend {
   dictionary: { word: string; reading: string }[];
   fileErrors: { path: string; error: string; created_at: string }[];
   references: SavedReference[];
+  batches: MockBatch[];
+  /** Bodies sent to POST /api/batches. */
+  batchRequests: Record<string, unknown>[];
   /** Resolve to let a pending POST /api/generate answer. */
   release?: () => void;
   holdGenerate: boolean;
@@ -109,6 +126,8 @@ export function generation(id: number, text: string, extra = {}): Generation {
     speed: 1,
     audio_url: `/api/generations/${id}/audio`,
     saved: false,
+    character: null,
+    favorite: false,
     ...extra,
   };
 }
@@ -128,6 +147,11 @@ export function savedReference(
   };
 }
 
+function publicBatch(batch: MockBatch) {
+  const { pending: _pending, ...rest } = batch;
+  return rest;
+}
+
 export async function mockBackend(
   page: Page,
   initial: Partial<Backend> = {},
@@ -138,6 +162,8 @@ export async function mockBackend(
     dictionary: [],
     fileErrors: [],
     references: [],
+    batches: [],
+    batchRequests: [],
     holdGenerate: false,
     ...initial,
   };
@@ -183,8 +209,80 @@ export async function mockBackend(
     }
     if (path === "/api/generations/cleanup" && method === "POST") {
       const before = backend.generations.length;
-      backend.generations = backend.generations.filter((item) => item.saved);
+      backend.generations = backend.generations.filter(
+        (item) => item.saved || item.favorite,
+      );
       return json(route, { deleted: before - backend.generations.length });
+    }
+    const favorite = path.match(/^\/api\/generations\/(\d+)\/favorite$/);
+    if (favorite && method === "PUT") {
+      const target = backend.generations.find(
+        (item) => item.id === Number(favorite[1]),
+      );
+      if (!target) {
+        return json(route, { error: "生成の記録が見つかりません。" }, 404);
+      }
+      target.favorite = (
+        request.postDataJSON() as { favorite: boolean }
+      ).favorite;
+      return json(route, target);
+    }
+    if (path === "/api/batches" && method === "POST") {
+      const body = request.postDataJSON() as {
+        character: string;
+        lines: string;
+      };
+      backend.batchRequests.push(body);
+      if (!backend.references.some((r) => r.character === body.character)) {
+        return json(
+          route,
+          {
+            error:
+              "このキャラクターのお手本がありません。生成履歴からお手本に保存してください。",
+          },
+          400,
+        );
+      }
+      const lines = body.lines
+        .split("\n")
+        .map((line) => line.trim())
+        .filter(Boolean);
+      const batch: MockBatch = {
+        id: `batch-${backend.batches.length + 1}`,
+        character: body.character,
+        total: lines.length,
+        done: 0,
+        generation_ids: [],
+        failed: [],
+        finished: false,
+        pending: lines,
+      };
+      backend.batches.unshift(batch);
+      return json(route, { id: batch.id, total: batch.total }, 202);
+    }
+    if (path === "/api/batches" && method === "GET") {
+      return json(route, { batches: backend.batches.map(publicBatch) });
+    }
+    const batchOne = path.match(/^\/api\/batches\/(.+)$/);
+    if (batchOne && method === "GET") {
+      const batch = backend.batches.find((item) => item.id === batchOne[1]);
+      if (!batch) return json(route, { error: "not found" }, 404);
+      const line = batch.pending.shift();
+      if (line !== undefined) {
+        batch.done += 1;
+        if (line.includes("失敗")) {
+          batch.failed.push({ line, error: "生成できませんでした。" });
+        } else {
+          const made = generation(nextId++, line, {
+            character: batch.character,
+            mode: "clone",
+          });
+          backend.generations.unshift(made);
+          batch.generation_ids.push(made.id);
+        }
+        batch.finished = batch.pending.length === 0;
+      }
+      return json(route, publicBatch(batch));
     }
     const save = path.match(/^\/api\/generations\/(\d+)\/reference$/);
     if (save && method === "POST") {

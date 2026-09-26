@@ -14,7 +14,10 @@
   import {
     CHARACTER_MAX,
     characterName,
-    unsavedCount,
+    deletableCount,
+    filterByCharacter,
+    generationLabel,
+    historyCharacters,
   } from "../lib/references";
   import { info, loadInfo, playback } from "../lib/state.svelte";
 
@@ -34,7 +37,35 @@
   let cleanupOpen = $state(false);
   let message = $state("");
 
-  let unsaved = $derived(unsavedCount(generations));
+  // The filter lives in the URL so 「まとめて生成」 can link to one character.
+  let filter = $state(
+    new URLSearchParams(window.location.search).get("character") ?? "",
+  );
+  let deletable = $derived(deletableCount(generations));
+  let shown = $derived(filterByCharacter(generations, filter));
+  let names = $derived(historyCharacters(generations));
+
+  function setFilter(value: string) {
+    filter = value;
+    const query = value ? `?character=${encodeURIComponent(value)}` : "";
+    window.history.replaceState(null, "", `/history${query}`);
+  }
+
+  async function toggleFavorite(generation: Generation) {
+    deleteError = "";
+    try {
+      const updated = await api.setFavorite(
+        generation.id,
+        !generation.favorite,
+      );
+      generation.favorite = updated.favorite;
+    } catch (error) {
+      deleteError =
+        error instanceof ApiError
+          ? error.message
+          : "お気に入りを変更できませんでした。";
+    }
+  }
 
   const label = (
     choices: { id: string; label: string }[] | undefined,
@@ -181,18 +212,38 @@
   {/if}
   {#if listState === "success"}
     <div class="toolbar">
-      <button
-        class="btn"
-        type="button"
-        disabled={unsaved === 0}
-        onclick={askCleanup}
-        ><Icon
-          name="trash"
-        />保存していない音声を一括削除（{unsaved}件）</button
-      >
-      <p class="help">
-        お手本に保存した音声は残ります。<a href="/references">お手本の一覧</a>
-      </p>
+      {#if names.length > 0 || filter}
+        <div class="field filter">
+          <label for="history-filter">キャラクター</label>
+          <select
+            id="history-filter"
+            class="input"
+            value={filter}
+            onchange={(event) => setFilter(event.currentTarget.value)}
+          >
+            <option value="">すべて</option>
+            {#each names.includes(filter) || !filter ? names : [filter, ...names] as name (name)}
+              <option value={name}>{name}</option>
+            {/each}
+          </select>
+        </div>
+      {/if}
+      <div class="cleanup">
+        <button
+          class="btn"
+          type="button"
+          disabled={deletable === 0}
+          onclick={askCleanup}
+          ><Icon
+            name="trash"
+          />★もお手本もない音声を一括削除（{deletable}件）</button
+        >
+        <p class="help">
+          ★を付けた音声とお手本に保存した音声は残ります。絞り込みに関係なく履歴全体が対象です。<a
+            href="/references">お手本の一覧</a
+          >
+        </p>
+      </div>
     </div>
   {/if}
   <p class="message" role="status">{message}</p>
@@ -213,10 +264,34 @@
         再読み込み
       </button>
     </div>
+  {:else if shown.length === 0}
+    <div class="state-wrap">
+      <p class="state">{filter}の音声はありません。</p>
+      <button class="btn" type="button" onclick={() => setFilter("")}>
+        絞り込みを解除
+      </button>
+    </div>
   {:else}
     <ul class="cards">
-      {#each generations as generation (generation.id)}
+      {#each shown as generation (generation.id)}
         <li class="card">
+          <div class="card-head">
+            <span class="ident">{generationLabel(generation)}</span>
+            <button
+              class="icon-btn star"
+              class:on={generation.favorite}
+              type="button"
+              aria-pressed={generation.favorite}
+              aria-label={`${generationLabel(generation)}をお気に入り（★）にする`}
+              title={generation.favorite
+                ? "お気に入り（★）を外す"
+                : "お気に入り（★）にする"}
+              onclick={() => void toggleFavorite(generation)}
+              ><Icon
+                name={generation.favorite ? "star-filled" : "star"}
+              /></button
+            >
+          </div>
           <p class="text">{generation.text}</p>
           <p class="meta">
             <time datetime={generation.created_at}
@@ -314,12 +389,12 @@
 
 {#if cleanupOpen}
   <ConfirmModal
-    title="保存していない音声の一括削除"
+    title="★もお手本もない音声の一括削除"
     confirmLabel="削除する"
     onconfirm={() => void confirmCleanup()}
     oncancel={cancelCleanup}
   >
-    お手本に保存していない{unsaved}件の音声を削除しますか？記録とWAVファイルを削除し、元に戻せません。お手本に保存した音声は残ります。
+    ★もお手本への保存もない{deletable}件の音声を削除しますか？記録とWAVファイルを削除し、元に戻せません。★を付けた音声とお手本に保存した音声は残ります。
   </ConfirmModal>
 {/if}
 
@@ -391,13 +466,38 @@
 
   .toolbar
     display: flex
-    flex-wrap: wrap
-    align-items: center
-    gap: var(--sp-2) var(--sp-3)
-    margin-bottom: var(--sp-2)
+    flex-direction: column
+    gap: var(--sp-3)
+    margin-bottom: var(--sp-3)
 
-    .help
-      margin: 0
+  .filter
+    max-width: 320px
+
+  .cleanup
+    display: flex
+    flex-direction: column
+    align-items: flex-start
+    gap: var(--sp-1)
+
+  .card-head
+    display: flex
+    align-items: center
+    justify-content: space-between
+    gap: var(--sp-2)
+    margin: -4px -4px 0 0
+
+  .ident
+    min-width: 0
+    font-size: var(--fs-sm)
+    font-weight: 600
+    overflow-wrap: anywhere
+
+  .star
+    flex: none
+    color: var(--c-muted)
+
+    &.on
+      color: var(--c-accent)
 
   .message
     margin: 0 0 var(--sp-2)
@@ -409,7 +509,7 @@
   .save-row
     display: flex
 
-  .toolbar .btn, .btn-sm
+  .cleanup .btn, .btn-sm
     display: inline-flex
     align-items: center
     gap: var(--sp-1)

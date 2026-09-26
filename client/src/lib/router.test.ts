@@ -14,6 +14,7 @@ describe("matchRoute", () => {
     expect(matchRoute("/history").index).toBe(2);
     expect(matchRoute("/credits").index).toBe(3);
     expect(matchRoute("/references").index).toBe(4);
+    expect(matchRoute("/batch").index).toBe(5);
   });
 
   it("normalizes unknown paths to home", () => {

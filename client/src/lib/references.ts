@@ -21,9 +21,34 @@ export function characterName(
   return { value };
 }
 
-/** Generations that 「保存していない音声を一括削除」 would remove. */
-export function unsavedCount(generations: Generation[]): number {
-  return generations.filter((generation) => !generation.saved).length;
+/** Generations bulk deletion would remove: neither starred nor saved as a reference. */
+export function deletableCount(generations: Generation[]): number {
+  return generations.filter(
+    (generation) => !generation.saved && !generation.favorite,
+  ).length;
+}
+
+/** 「キャラクター名 #ID」, or just the ID for audio without a character. */
+export function generationLabel(generation: Generation): string {
+  return generation.character
+    ? `${generation.character} #${generation.id}`
+    : `#${generation.id}`;
+}
+
+/** An empty character keeps every generation. */
+export function filterByCharacter(
+  generations: Generation[],
+  character: string,
+): Generation[] {
+  return character
+    ? generations.filter((generation) => generation.character === character)
+    : generations;
+}
+
+/** Character names in the history, in order of appearance. */
+export function historyCharacters(generations: Generation[]): string[] {
+  const names = generations.map((generation) => generation.character ?? "");
+  return [...new Set(names.filter(Boolean))];
 }
 
 /** Groups references by character, keeping the order the server sent. */

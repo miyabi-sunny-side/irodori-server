@@ -54,9 +54,16 @@ ALTER TABLE references_audio ADD COLUMN source_generation_id INTEGER;
 PRAGMA user_version = 2;
 ";
 
-/// A generation is kept by bulk deletion while it has been saved as a reference.
-const DELETABLE: &str =
-    "NOT EXISTS (SELECT 1 FROM references_audio r WHERE r.source_generation_id = generations.id)";
+/// Version 3: generations carry the character whose references voiced them, and a favourite mark.
+const MIGRATE_V3: &str = "
+ALTER TABLE generations ADD COLUMN character TEXT;
+ALTER TABLE generations ADD COLUMN favorite INTEGER NOT NULL DEFAULT 0;
+PRAGMA user_version = 3;
+";
+
+/// Bulk deletion keeps favourites and generations saved as references.
+const DELETABLE: &str = "favorite = 0 AND NOT EXISTS
+    (SELECT 1 FROM references_audio r WHERE r.source_generation_id = generations.id)";
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Generation {
@@ -79,6 +86,9 @@ pub struct Generation {
     pub audio_url: String,
     /// Saved as a reference, so bulk deletion keeps it.
     pub saved: bool,
+    pub character: Option<String>,
+    /// Marked with ★, so bulk deletion keeps it.
+    pub favorite: bool,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq)]
@@ -123,10 +133,12 @@ impl Db {
             tx.commit()?;
         }
         let version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        if version < 2 {
-            let tx = conn.transaction()?;
-            tx.execute_batch(MIGRATE_V2)?;
-            tx.commit()?;
+        for (target, migration) in [(2, MIGRATE_V2), (3, MIGRATE_V3)] {
+            if version < target {
+                let tx = conn.transaction()?;
+                tx.execute_batch(migration)?;
+                tx.commit()?;
+            }
         }
         Ok(Self(conn))
     }
@@ -169,6 +181,32 @@ impl Db {
         Ok(self.0.last_insert_rowid())
     }
 
+    /// Path and character name of a reference.
+    pub fn reference_entry(&self, id: i64) -> rusqlite::Result<Option<(String, Option<String>)>> {
+        self.0
+            .query_row(
+                "SELECT path, character FROM references_audio WHERE id = ?1",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+    }
+
+    /// Saved references of one character, oldest first.
+    pub fn character_references(&self, character: &str) -> rusqlite::Result<Vec<i64>> {
+        let mut stmt = self
+            .0
+            .prepare("SELECT id FROM references_audio WHERE character = ?1 ORDER BY id")?;
+        stmt.query_map([character], |row| row.get(0))?.collect()
+    }
+
+    pub fn set_favorite(&self, id: i64, favorite: bool) -> rusqlite::Result<bool> {
+        Ok(self.0.execute(
+            "UPDATE generations SET favorite = ?2 WHERE id = ?1",
+            params![id, favorite],
+        )? > 0)
+    }
+
     pub fn reference_path(&self, id: i64) -> rusqlite::Result<Option<String>> {
         self.0
             .query_row(
@@ -186,8 +224,8 @@ impl Db {
         for row in rows {
             tx.execute(
                 "INSERT INTO generations (batch, candidate, created_at, text, text_applied, mode, caption,
-                 reference_ids, model, seed, speed, params, log, path)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                 reference_ids, model, seed, speed, params, log, path, character)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
                 params![
                     row.batch,
                     row.candidate,
@@ -203,6 +241,7 @@ impl Db {
                     row.params.to_string(),
                     row.log,
                     row.path,
+                    row.character,
                 ],
             )?;
             let id = tx.last_insert_rowid();
@@ -210,6 +249,7 @@ impl Db {
                 id,
                 audio_url: audio_url(id),
                 saved: false,
+                favorite: false,
                 ..row.clone()
             });
         }
@@ -324,7 +364,8 @@ impl Db {
 const SELECT_GENERATION: &str =
     "SELECT id, batch, candidate, created_at, text, text_applied, mode, caption,
     reference_ids, model, seed, speed, params, log, path,
-    EXISTS (SELECT 1 FROM references_audio r WHERE r.source_generation_id = generations.id)
+    EXISTS (SELECT 1 FROM references_audio r WHERE r.source_generation_id = generations.id),
+    character, favorite
     FROM generations";
 
 const SELECT_REFERENCE: &str =
@@ -365,6 +406,8 @@ fn generation_row(row: &rusqlite::Row) -> rusqlite::Result<Generation> {
         path: row.get(14)?,
         audio_url: audio_url(id),
         saved: row.get(15)?,
+        character: row.get(16)?,
+        favorite: row.get(17)?,
     })
 }
 
@@ -405,6 +448,8 @@ mod tests {
             path: format!("audio/{batch}_{candidate:02}.wav"),
             audio_url: String::new(),
             saved: false,
+            character: None,
+            favorite: false,
         }
     }
 
@@ -525,7 +570,7 @@ mod tests {
         let version: i64 =
             db.0.pragma_query_value(None, "user_version", |row| row.get(0))
                 .unwrap();
-        assert_eq!(version, 2);
+        assert_eq!(version, 3);
     }
 
     #[test]
@@ -559,6 +604,33 @@ mod tests {
         assert!(
             !db.generation(rows[1].id).unwrap().unwrap().saved,
             "deleting the reference releases the generation"
+        );
+    }
+
+    #[test]
+    fn favourites_survive_bulk_deletion_and_characters_are_stored() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("f.sqlite3");
+        let mut db = Db::open(&db_path, &dir.path().join("none.json")).unwrap();
+        let mut voiced = sample("b1", 1);
+        voiced.character = Some("ずんだ".into());
+        let rows = db.insert_generations(&[voiced, sample("b1", 2)]).unwrap();
+        assert!(db.set_favorite(rows[0].id, true).unwrap());
+        assert!(!db.set_favorite(9999, true).unwrap());
+        drop(db);
+
+        let mut db = Db::open(&db_path, &dir.path().join("none.json")).unwrap();
+        let kept = db.generation(rows[0].id).unwrap().unwrap();
+        assert!(kept.favorite);
+        assert_eq!(kept.character.as_deref(), Some("ずんだ"));
+        assert_eq!(
+            db.delete_unsaved_generations().unwrap(),
+            vec!["audio/b1_02.wav".to_owned()]
+        );
+        db.set_favorite(rows[0].id, false).unwrap();
+        assert_eq!(
+            db.delete_unsaved_generations().unwrap(),
+            vec!["audio/b1_01.wav".to_owned()]
         );
     }
 

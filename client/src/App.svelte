@@ -6,6 +6,7 @@
   import Credits from "./pages/Credits.svelte";
   import Dictionary from "./pages/Dictionary.svelte";
   import History from "./pages/History.svelte";
+  import Batch from "./pages/Batch.svelte";
   import References from "./pages/References.svelte";
 
   $effect(() => initRouter());
@@ -29,6 +30,8 @@
     <Credits />
   {:else if router.index === 4}
     <References />
+  {:else if router.index === 5}
+    <Batch />
   {:else}
     <Create />
   {/if}

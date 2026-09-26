@@ -72,6 +72,28 @@ export interface Generation {
   audio_url: string;
   /** Saved as a reference; bulk deletion keeps it. */
   saved: boolean;
+  /** Set when every reference used belongs to one character. */
+  character: string | null;
+  /** Marked with ★; bulk deletion keeps it. */
+  favorite: boolean;
+}
+
+/** Progress of a まとめて生成 run, kept in server memory. */
+export interface Batch {
+  id: string;
+  character: string;
+  total: number;
+  done: number;
+  generation_ids: number[];
+  failed: { line: string; error: string }[];
+  finished: boolean;
+}
+
+export interface BatchSettings {
+  mode: string;
+  caption: string;
+  num_steps: number;
+  speed: number;
 }
 
 export interface FileError {
@@ -160,6 +182,20 @@ export const api = {
     request<{ deleted: number }>("/api/generations/cleanup", {
       method: "POST",
     }),
+  setFavorite: (id: number, favorite: boolean) =>
+    request<Generation>(
+      `/api/generations/${id}/favorite`,
+      sendJson("PUT", { favorite }),
+    ),
+  startBatch: (character: string, lines: string, settings: BatchSettings) =>
+    request<{ id: string; total: number }>(
+      "/api/batches",
+      sendJson("POST", { character, lines, settings }),
+    ),
+  batch: (id: string, signal?: AbortSignal) =>
+    request<Batch>(`/api/batches/${encodeURIComponent(id)}`, { signal }),
+  batches: (signal?: AbortSignal) =>
+    request<{ batches: Batch[] }>("/api/batches", { signal }),
   saveReference: (generationId: number, character: string) =>
     request<Reference>(
       `/api/generations/${generationId}/reference`,

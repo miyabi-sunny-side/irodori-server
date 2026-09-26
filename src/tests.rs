@@ -292,6 +292,143 @@ async fn a_generation_saved_as_a_reference_survives_bulk_deletion() {
 }
 
 #[tokio::test]
+async fn a_batch_voices_every_line_with_the_characters_references() {
+    let server = Server::new();
+    let body = json_body(
+        server
+            .call(
+                "POST",
+                "/api/generate",
+                Some(json!({"text": "お手本です。"})),
+            )
+            .await,
+    )
+    .await;
+    let source = body["generations"][0]["id"].as_i64().unwrap();
+    let reference = json_body(
+        server
+            .call(
+                "POST",
+                &format!("/api/generations/{source}/reference"),
+                Some(json!({"character": "ずんだ"})),
+            )
+            .await,
+    )
+    .await;
+
+    let missing = server
+        .call(
+            "POST",
+            "/api/batches",
+            Some(json!({"character": "だれ", "lines": "a"})),
+        )
+        .await;
+    assert_eq!(missing.status(), StatusCode::BAD_REQUEST);
+    let empty = server
+        .call(
+            "POST",
+            "/api/batches",
+            Some(json!({"character": "ずんだ", "lines": "\n \n"})),
+        )
+        .await;
+    assert_eq!(empty.status(), StatusCode::BAD_REQUEST);
+
+    let started = server
+        .call(
+            "POST",
+            "/api/batches",
+            Some(json!({"character": "ずんだ", "lines": "一行目\n落ちる\n\n三行目", "settings": {"num_steps": 4}})),
+        )
+        .await;
+    assert_eq!(started.status(), StatusCode::ACCEPTED);
+    let started = json_body(started).await;
+    assert_eq!(started["total"], 3);
+    let id = started["id"].as_str().unwrap().to_owned();
+    let batch = loop {
+        let batch = json_body(
+            server
+                .call("GET", &format!("/api/batches/{id}"), None)
+                .await,
+        )
+        .await;
+        if batch["finished"] == true {
+            break batch;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    };
+    assert_eq!(batch["done"], 3);
+    assert_eq!(batch["generation_ids"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        batch["failed"][0]["line"], "落ちる",
+        "a failed line does not stop the batch"
+    );
+
+    let history = json_body(server.call("GET", "/api/generations", None).await).await;
+    let voiced: Vec<&Value> = history["generations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|g| g["character"] == "ずんだ")
+        .collect();
+    assert_eq!(voiced.len(), 2);
+    assert_eq!(voiced[0]["reference_ids"], json!([reference["id"]]));
+    assert_eq!(voiced[0]["mode"], "clone");
+    assert!(
+        voiced[0]["log"]
+            .as_str()
+            .unwrap()
+            .contains("\"num_steps\": 4"),
+        "settings are applied"
+    );
+    let listed = json_body(server.call("GET", "/api/batches", None).await).await;
+    assert_eq!(listed["batches"][0]["id"], id.as_str());
+}
+
+#[tokio::test]
+async fn favourites_are_kept_by_bulk_deletion() {
+    let server = Server::new();
+    let body = json_body(
+        server
+            .call(
+                "POST",
+                "/api/generate",
+                Some(json!({"text": "星です。", "num_candidates": 2})),
+            )
+            .await,
+    )
+    .await;
+    let first = body["generations"][0]["id"].as_i64().unwrap();
+    let starred = json_body(
+        server
+            .call(
+                "PUT",
+                &format!("/api/generations/{first}/favorite"),
+                Some(json!({"favorite": true})),
+            )
+            .await,
+    )
+    .await;
+    assert_eq!(starred["favorite"], true);
+    assert_eq!(
+        server
+            .call(
+                "PUT",
+                "/api/generations/9999/favorite",
+                Some(json!({"favorite": true}))
+            )
+            .await
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+
+    let cleaned = json_body(server.call("POST", "/api/generations/cleanup", None).await).await;
+    assert_eq!(cleaned["deleted"], 1);
+    let history = json_body(call(&server.restart(), "GET", "/api/generations", None).await).await;
+    assert_eq!(history["generations"].as_array().unwrap().len(), 1);
+    assert_eq!(history["generations"][0]["favorite"], true);
+}
+
+#[tokio::test]
 async fn invalid_requests_are_rejected_before_the_worker_runs() {
     let server = Server::new();
     for body in [

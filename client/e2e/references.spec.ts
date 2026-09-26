@@ -11,7 +11,7 @@ test("a history item is saved as a reference under a character name", async ({
   });
   await page.goto("/history");
   const cleanup = page.getByRole("button", {
-    name: /保存していない音声を一括削除/,
+    name: /★もお手本もない音声を一括削除/,
   });
   await expect(cleanup).toContainText("（2件）");
   const card = page.locator(".card").first();
@@ -40,9 +40,9 @@ test("a history item is saved as a reference under a character name", async ({
   );
   await expect(card.getByText("お手本に保存済み")).toBeFocused();
   await expect(cleanup).toContainText("（1件）");
-  await expect(
-    card.getByRole("button", { name: /お手本に保存/ }),
-  ).toHaveCount(0);
+  await expect(card.getByRole("button", { name: /お手本に保存/ })).toHaveCount(
+    0,
+  );
   expect(
     backend.references.map((r) => [r.character, r.source_generation_id]),
   ).toEqual([
@@ -51,9 +51,7 @@ test("a history item is saved as a reference under a character name", async ({
   ]);
 
   await page.reload();
-  await expect(page.locator(".card").first()).toContainText(
-    "お手本に保存済み",
-  );
+  await expect(page.locator(".card").first()).toContainText("お手本に保存済み");
 });
 
 test("bulk deletion removes only unsaved history after confirmation", async ({
@@ -61,6 +59,7 @@ test("bulk deletion removes only unsaved history after confirmation", async ({
 }) => {
   const backend = await mockBackend(page, {
     generations: [
+      generation(4, "星の声", { favorite: true }),
       generation(3, "残す声", { saved: true }),
       generation(2, "消す声 1"),
       generation(1, "消す声 2"),
@@ -68,26 +67,27 @@ test("bulk deletion removes only unsaved history after confirmation", async ({
   });
   await page.goto("/history");
   const cleanup = page.getByRole("button", {
-    name: "保存していない音声を一括削除（2件）",
+    name: "★もお手本もない音声を一括削除（2件）",
   });
   await cleanup.click();
   const dialog = page.getByRole("dialog", {
-    name: "保存していない音声の一括削除",
+    name: "★もお手本もない音声の一括削除",
   });
-  await expect(dialog).toContainText("お手本に保存していない2件の音声");
+  await expect(dialog).toContainText("★もお手本への保存もない2件の音声");
   await dialog.getByRole("button", { name: "キャンセル" }).click();
   await expect(cleanup).toBeFocused();
-  expect(backend.generations).toHaveLength(3);
+  expect(backend.generations).toHaveLength(4);
 
   await cleanup.click();
   await dialog.getByRole("button", { name: "削除する" }).click();
   await expect(page.getByRole("status")).toHaveText(
     "2件の音声を削除しました。",
   );
-  await expect(page.locator(".card")).toHaveCount(1);
-  await expect(page.locator(".card")).toContainText("残す声");
+  await expect(page.locator(".card")).toHaveCount(2);
+  await expect(page.locator(".card").nth(0)).toContainText("星の声");
+  await expect(page.locator(".card").nth(1)).toContainText("残す声");
   await expect(
-    page.getByRole("button", { name: "保存していない音声を一括削除（0件）" }),
+    page.getByRole("button", { name: "★もお手本もない音声を一括削除（0件）" }),
   ).toBeDisabled();
 });
 
@@ -104,9 +104,7 @@ test("references are listed by character, played and deleted", async ({
   await page.goto("/references");
   const groups = page.locator("section.group");
   await expect(groups).toHaveCount(2);
-  await expect(groups.first().getByRole("heading")).toHaveText(
-    /あかり\s*2件/,
-  );
+  await expect(groups.first().getByRole("heading")).toHaveText(/あかり\s*2件/);
   await expect(groups.first()).toContainText("元の生成 #11");
   await expect(groups.first().locator("audio").first()).toHaveAttribute(
     "src",

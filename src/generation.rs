@@ -312,6 +312,38 @@ pub fn character_name(raw: &str) -> Result<String, &'static str> {
     Ok(name.to_owned())
 }
 
+/// Most lines one batch may queue.
+pub const MAX_BATCH_LINES: usize = 100;
+
+/// The character a generation belongs to: set when every reference used shares one name.
+pub fn shared_character(characters: &[Option<String>]) -> Option<String> {
+    let first = characters.first()?.as_ref()?;
+    characters
+        .iter()
+        .all(|c| c.as_ref() == Some(first))
+        .then(|| first.clone())
+}
+
+/// Splits batch input into one line per generation, skipping blank lines.
+pub fn batch_lines(raw: &str) -> Result<Vec<String>, String> {
+    let lines: Vec<String> = raw
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(str::to_owned)
+        .collect();
+    if lines.is_empty() {
+        return Err("台詞を1行以上入力してください。".into());
+    }
+    if lines.len() > MAX_BATCH_LINES {
+        return Err(format!("一度に生成できるのは{MAX_BATCH_LINES}行までです。"));
+    }
+    if lines.iter().any(|l| l.chars().count() > MAX_TEXT_CHARS) {
+        return Err(format!("1行は{MAX_TEXT_CHARS}文字までです。"));
+    }
+    Ok(lines)
+}
+
 /// Puts bf16 first wherever a device offers it, making it the default precision.
 pub fn prefer_bf16(runtime: &mut Runtime) {
     for precisions in runtime.precisions.values_mut() {
@@ -517,6 +549,34 @@ mod tests {
         for bad in ["", "   ", "a\nb", "a\tb", &"あ".repeat(51)] {
             assert!(character_name(bad).is_err(), "accepted {bad:?}");
         }
+    }
+
+    #[test]
+    fn a_character_is_recorded_only_when_all_references_share_it() {
+        let some = |s: &str| Some(s.to_owned());
+        assert_eq!(
+            shared_character(&[some("ずんだ"), some("ずんだ")]),
+            some("ずんだ")
+        );
+        assert_eq!(shared_character(&[some("ずんだ"), some("あかり")]), None);
+        assert_eq!(
+            shared_character(&[some("ずんだ"), None]),
+            None,
+            "an unnamed upload mixes voices"
+        );
+        assert_eq!(shared_character(&[]), None);
+    }
+
+    #[test]
+    fn batch_lines_are_trimmed_non_blank_and_limited() {
+        assert_eq!(
+            batch_lines(" おはよう \n\n\r\nこんにちは\r\n  "),
+            Ok(vec!["おはよう".to_owned(), "こんにちは".to_owned()])
+        );
+        assert!(batch_lines(" \n ").is_err(), "nothing to generate");
+        assert!(batch_lines(&"あ\n".repeat(MAX_BATCH_LINES)).is_ok());
+        assert!(batch_lines(&"あ\n".repeat(MAX_BATCH_LINES + 1)).is_err());
+        assert!(batch_lines(&"あ".repeat(MAX_TEXT_CHARS + 1)).is_err());
     }
 
     #[test]
