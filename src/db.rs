@@ -1,4 +1,4 @@
-//! SQLite records for generations, reference audio and the reading dictionary.
+//! `SQLite` records for generations, reference audio and the reading dictionary.
 //! Paths are stored relative to the data directory; only the server writes here.
 
 use std::path::Path;
