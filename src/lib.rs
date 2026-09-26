@@ -1,80 +1,157 @@
+// Application crate: the library split exists for tests, not for external callers.
+#![allow(
+    clippy::missing_errors_doc,
+    clippy::missing_panics_doc,
+    clippy::must_use_candidate
+)]
+
+pub mod db;
+pub mod dictionary;
+pub mod generation;
+pub mod worker;
+
+use std::{
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex},
+};
+
 use axum::{
     Json, Router,
-    extract::Path as UrlPath,
+    body::Body,
+    extract::{DefaultBodyLimit, Multipart, Path as UrlPath, Query, Request, State},
     http::{StatusCode, Uri, header},
-    response::IntoResponse,
-    response::Response,
-    routing::get,
+    response::{IntoResponse, Response},
+    routing::{delete, get, post},
 };
-use serde::Serialize;
-use tower_http::trace::TraceLayer;
+use serde::Deserialize;
+use serde_json::{Value, json};
+use tower::ServiceExt;
+use tower_http::{services::ServeFile, trace::TraceLayer};
+
+use crate::{
+    db::{Db, Generation},
+    generation::{GenerateRequest, MODELS, MODES, Runtime},
+    worker::{Worker, WorkerError},
+};
 
 static UI: include_dir::Dir<'_> = include_dir::include_dir!("$CARGO_MANIFEST_DIR/client/dist");
 
-#[derive(Serialize)]
-struct HealthResponse {
-    status: &'static str,
+const MAX_REFERENCE_BYTES: usize = 50 * 1024 * 1024;
+const REFERENCE_EXTENSIONS: &[&str] = &["wav", "mp3", "flac", "ogg", "opus", "m4a", "aac", "webm"];
+
+/// Where the server keeps its files and how it starts the inference worker.
+pub struct Config {
+    pub data_dir: PathBuf,
+    pub legacy_dictionary: PathBuf,
+    pub worker: Worker,
 }
 
-#[derive(Serialize)]
-struct Item {
-    id: &'static str,
-    name: &'static str,
-    summary: &'static str,
-    status: &'static str,
-    updated_at: &'static str,
-    body: &'static str,
+impl Config {
+    /// Layout of a checkout prepared by `irodori.sh setup`, relative to the working directory.
+    pub fn from_checkout(root: &Path) -> Self {
+        Self {
+            data_dir: root.join("data"),
+            legacy_dictionary: root.join("config/reading_dictionary.json"),
+            worker: Worker::new(
+                root.join(".venv/bin/python"),
+                vec!["irodori_worker.py".into()],
+                root.into(),
+            ),
+        }
+    }
 }
 
-// Demo fixtures for the starter UI. A derived project replaces this data
-// source with its own domain.
-const ITEMS: &[Item] = &[
-    Item {
-        id: "theme",
-        name: "テーマ切替",
-        summary: "ハンバーガーメニューの1要素目からテーマ設定を開き、自動・ライト・ダークを選べます。",
-        status: "stable",
-        updated_at: "2026-08-07",
-        body: "選択は localStorage に保存され、次回表示でも同じテーマで描画されます。\
-        自動を選ぶと保存値と data-theme 属性が消え、OS の設定に従います。\
-        モーダルは選択後も開いたままになるので、テーマの変化をその場で確認できます。",
-    },
-    Item {
-        id: "router",
-        name: "ルーター",
-        summary: "依存を増やさない小さな History API ルーターがページ遷移を担います。",
-        status: "stable",
-        updated_at: "2026-08-07",
-        body: "カードから詳細への遷移は pushState、ブラウザの戻るは popstate で復元します。\
-        深い URL を直接開いてもサーバが index.html を返すため、リロードで同じページが表示されます。",
-    },
-    Item {
-        id: "auto-reload",
-        name: "自動再取得",
-        summary: "トップページは表示のたびに API から一覧を取り直します。",
-        status: "stable",
-        updated_at: "2026-08-07",
-        body: "初回表示に加えて、タブが非表示から表示に戻ったときにも一覧を再取得します。\
-        読み込み中・空・エラー・成功の4状態を data-state 属性で公開しています。",
-    },
-    Item {
-        id: "icons",
-        name: "アイコン辞書",
-        summary: "SVG アイコンは Icon.svelte の1ファイルに集約されています。",
-        status: "stable",
-        updated_at: "2026-08-07",
-        body: "派生プロジェクトで作ったアイコンはこの辞書へ引き取り、家族全体で1箇所に育てます。\
-        絵文字や文字グリフをアイコンとして使うことは禁止です。\
-        以下は現在の辞書の全エントリの実物見本です。",
-    },
-];
+#[derive(Clone)]
+pub struct AppState(Arc<Inner>);
 
-pub fn app() -> Router {
+struct Inner {
+    db: Mutex<Db>,
+    data_dir: PathBuf,
+    worker: Worker,
+    info: tokio::sync::Mutex<Option<(Runtime, Vec<Value>)>>,
+}
+
+impl AppState {
+    pub fn open(config: Config) -> Result<Self, Box<dyn std::error::Error>> {
+        for dir in ["audio", "references", "tmp"] {
+            std::fs::create_dir_all(config.data_dir.join(dir))?;
+        }
+        let db = Db::open(
+            &config.data_dir.join("irodori.sqlite3"),
+            &config.legacy_dictionary,
+        )?;
+        Ok(Self(Arc::new(Inner {
+            db: Mutex::new(db),
+            data_dir: config.data_dir,
+            worker: config.worker,
+            info: tokio::sync::Mutex::new(None),
+        })))
+    }
+
+    /// Starts the inference worker and caches its device and emoji lists.
+    pub async fn warm_up(&self) {
+        if let Err(error) = self.runtime().await {
+            tracing::warn!(error = error.message, "inference worker is not ready yet");
+        }
+    }
+
+    async fn runtime(&self) -> Result<(Runtime, Vec<Value>), AppError> {
+        let mut info = self.0.info.lock().await;
+        if info.is_none() {
+            let reply = self
+                .0
+                .worker
+                .call(&json!({"op": "info"}))
+                .await
+                .map_err(|error| {
+                    tracing::error!(?error, "inference worker info failed");
+                    AppError::new(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "推論プロセスを起動できません。サーバーのログを確認してください。",
+                    )
+                })?;
+            let runtime: Runtime = serde_json::from_value(reply.clone()).map_err(|_| {
+                AppError::new(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "推論プロセスの応答を読めません。",
+                )
+            })?;
+            let emojis = reply["emojis"].as_array().cloned().unwrap_or_default();
+            *info = Some((runtime, generation::emoji_groups(&emojis)));
+        }
+        Ok(info.clone().expect("filled above"))
+    }
+
+    fn db(&self) -> std::sync::MutexGuard<'_, Db> {
+        self.0
+            .db
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+pub fn app(state: AppState) -> Router {
     let api = Router::new()
         .route("/health", get(api_health))
-        .route("/items", get(api_items))
-        .route("/items/{id}", get(api_item))
-        .fallback(api_not_found);
+        .route("/info", get(info))
+        .route("/generate", post(generate))
+        .route("/generations", get(list_generations))
+        .route(
+            "/generations/{id}",
+            get(get_generation).delete(delete_generation),
+        )
+        .route("/generations/{id}/audio", get(generation_audio))
+        .route(
+            "/references",
+            post(upload_reference).layer(DefaultBodyLimit::max(MAX_REFERENCE_BYTES + 64 * 1024)),
+        )
+        .route("/references/{id}/audio", get(reference_audio))
+        .route("/dictionary", get(get_dictionary).put(put_dictionary))
+        .route("/dictionary/preview", post(preview_dictionary))
+        .route("/dictionary/{word}", delete(delete_dictionary))
+        .route("/unload", post(unload))
+        .fallback(api_not_found)
+        .with_state(state);
 
     Router::new()
         .route("/healthz", get(healthz))
@@ -83,6 +160,507 @@ pub fn app() -> Router {
         .nest("/api", api)
         .fallback_service(get(ui))
         .layer(TraceLayer::new_for_http())
+}
+
+pub struct AppError {
+    status: StatusCode,
+    message: String,
+    log: Option<String>,
+}
+
+impl AppError {
+    fn new(status: StatusCode, message: impl Into<String>) -> Self {
+        Self {
+            status,
+            message: message.into(),
+            log: None,
+        }
+    }
+
+    fn internal(error: impl std::fmt::Display) -> Self {
+        tracing::error!(%error, "request failed");
+        Self::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "サーバーでエラーが発生しました。サーバーのログを確認してください。",
+        )
+    }
+}
+
+impl From<rusqlite::Error> for AppError {
+    fn from(error: rusqlite::Error) -> Self {
+        Self::internal(error)
+    }
+}
+
+impl From<std::io::Error> for AppError {
+    fn from(error: std::io::Error) -> Self {
+        Self::internal(error)
+    }
+}
+
+impl IntoResponse for AppError {
+    fn into_response(self) -> Response {
+        let mut body = json!({"error": self.message});
+        if let Some(log) = self.log {
+            body["log"] = log.into();
+        }
+        (self.status, Json(body)).into_response()
+    }
+}
+
+type ApiResult<T> = Result<T, AppError>;
+
+async fn info(State(state): State<AppState>) -> ApiResult<Json<Value>> {
+    let (runtime, emoji_groups) = state.runtime().await?;
+    let labelled = |items: &[(&str, &str)]| {
+        items
+            .iter()
+            .map(|(id, label)| json!({"id": id, "label": label}))
+            .collect::<Vec<_>>()
+    };
+    Ok(Json(json!({
+        "models": labelled(MODELS),
+        "modes": labelled(MODES),
+        "devices": runtime.devices,
+        "precisions": runtime.precisions,
+        "max_candidates": runtime.max_candidates,
+        "emoji_groups": emoji_groups,
+    })))
+}
+
+async fn generate(
+    State(state): State<AppState>,
+    Json(request): Json<GenerateRequest>,
+) -> ApiResult<Json<Value>> {
+    // Run detached so a closed browser tab does not abandon a half-recorded generation.
+    tokio::spawn(run_generation(state, request))
+        .await
+        .map_err(AppError::internal)?
+        .map(|(generations, log)| Json(json!({"generations": generations, "log": log})))
+}
+
+async fn run_generation(
+    state: AppState,
+    request: GenerateRequest,
+) -> ApiResult<(Vec<Generation>, String)> {
+    let (runtime, _) = state.runtime().await?;
+    request
+        .validate(&runtime)
+        .map_err(|message| AppError::new(StatusCode::BAD_REQUEST, message))?;
+    let data = state.0.data_dir.clone();
+    let (text_applied, references) = {
+        let db = state.db();
+        let text = if request.dictionary_enabled {
+            dictionary::apply(&request.text, &db.dictionary()?)
+        } else {
+            request.text.clone()
+        };
+        let mut references = Vec::new();
+        if request.uses_references() {
+            for id in &request.reference_ids {
+                let path = db.reference_path(*id)?.ok_or_else(|| {
+                    AppError::new(
+                        StatusCode::BAD_REQUEST,
+                        "お手本の音声が見つかりません。もう一度追加してください。",
+                    )
+                })?;
+                references.push(data.join(path).display().to_string());
+            }
+        }
+        (text, references)
+    };
+
+    let batch = format!(
+        "{}-{}",
+        chrono::Local::now().format("%Y%m%d-%H%M%S"),
+        &uuid::Uuid::new_v4().simple().to_string()[..6]
+    );
+    let scratch = data.join("tmp").join(&batch);
+    tokio::fs::create_dir_all(&scratch).await?;
+    let result = synthesize(
+        &state,
+        &request,
+        &text_applied,
+        &references,
+        &batch,
+        &scratch,
+    )
+    .await;
+    let _ = tokio::fs::remove_dir_all(&scratch).await;
+    result
+}
+
+async fn synthesize(
+    state: &AppState,
+    request: &GenerateRequest,
+    text_applied: &str,
+    references: &[String],
+    batch: &str,
+    scratch: &Path,
+) -> ApiResult<(Vec<Generation>, String)> {
+    let reply = state
+        .0
+        .worker
+        .call(&json!({"op": "generate", "params": request.worker_params(text_applied, references), "out_dir": scratch}))
+        .await
+        .map_err(worker_error)?;
+    let produced: Vec<PathBuf> = reply["paths"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(PathBuf::from)
+        .collect();
+    let log = format!(
+        "{}\n話速: {}倍",
+        reply["log"].as_str().unwrap_or_default(),
+        request.speed
+    );
+
+    // Finish every WAV under a temporary name, move it to its final name, then record it.
+    let mut rows = Vec::new();
+    let mut finals = Vec::new();
+    for (index, source) in produced.iter().enumerate() {
+        let candidate = index + 1;
+        let relative = format!("audio/{batch}_{candidate:02}.wav");
+        let target = state.0.data_dir.join(&relative);
+        let moved = async {
+            if (request.speed - 1.0).abs() > f64::EPSILON {
+                let partial = scratch.join(format!("speed_{candidate:02}.partial.wav"));
+                change_speed(source, &partial, request.speed).await?;
+                tokio::fs::rename(&partial, &target).await
+            } else {
+                tokio::fs::rename(source, &target).await
+            }
+        }
+        .await;
+        if let Err(error) = moved {
+            remove_all(&finals).await;
+            return Err(AppError::internal(error));
+        }
+        finals.push(target);
+        rows.push(Generation {
+            id: 0,
+            batch: batch.into(),
+            candidate: i64::try_from(candidate).unwrap_or(i64::MAX),
+            created_at: db::now(),
+            text: request.text.clone(),
+            text_applied: text_applied.into(),
+            mode: request.mode.clone(),
+            caption: request.caption.clone(),
+            reference_ids: if request.uses_references() {
+                request.reference_ids.clone()
+            } else {
+                Vec::new()
+            },
+            model: request.model.clone(),
+            seed: reply["seed"].as_str().map(str::to_owned),
+            speed: request.speed,
+            params: serde_json::to_value(request).unwrap_or(Value::Null),
+            log: log.clone(),
+            path: relative,
+            audio_url: String::new(),
+        });
+    }
+    let saved = state.db().insert_generations(&rows);
+    match saved {
+        Ok(saved) => Ok((saved, log)),
+        Err(error) => {
+            remove_all(&finals).await;
+            Err(error.into())
+        }
+    }
+}
+
+async fn remove_all(paths: &[PathBuf]) {
+    for path in paths {
+        let _ = tokio::fs::remove_file(path).await;
+    }
+}
+
+/// Pitch-preserving tempo change; the output is written to `target` only.
+async fn change_speed(source: &Path, target: &Path, speed: f64) -> std::io::Result<()> {
+    let output = tokio::process::Command::new("ffmpeg")
+        .args(["-hide_banner", "-loglevel", "error", "-nostdin", "-n", "-i"])
+        .arg(source)
+        .args([
+            "-map",
+            "0:a:0",
+            "-af",
+            &format!("atempo={speed:.4}"),
+            "-c:a",
+            "pcm_s24le",
+        ])
+        .arg(target)
+        .output()
+        .await?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(format!(
+            "ffmpeg failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )))
+    }
+}
+
+fn worker_error(error: WorkerError) -> AppError {
+    match error {
+        WorkerError::Failed {
+            error_type,
+            error,
+            trace,
+        } => AppError {
+            status: StatusCode::BAD_GATEWAY,
+            message: generation::error_message(&error_type, &error).into(),
+            log: Some(trace),
+        },
+        WorkerError::Died => AppError::new(
+            StatusCode::BAD_GATEWAY,
+            "推論プロセスが終了しました。次の生成で自動的に起動し直します。もう一度お試しください。",
+        ),
+        WorkerError::Unavailable(detail) => {
+            tracing::error!(detail, "inference worker unavailable");
+            AppError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "推論プロセスを起動できません。サーバーのログを確認してください。",
+            )
+        }
+    }
+}
+
+async fn list_generations(State(state): State<AppState>) -> ApiResult<Json<Value>> {
+    let db = state.db();
+    Ok(Json(
+        json!({"generations": db.generations()?, "file_errors": db.file_errors()?}),
+    ))
+}
+
+fn find_generation(state: &AppState, id: i64) -> ApiResult<Generation> {
+    state
+        .db()
+        .generation(id)?
+        .ok_or_else(|| AppError::new(StatusCode::NOT_FOUND, "生成の記録が見つかりません。"))
+}
+
+async fn get_generation(
+    State(state): State<AppState>,
+    UrlPath(id): UrlPath<i64>,
+) -> ApiResult<Json<Generation>> {
+    find_generation(&state, id).map(Json)
+}
+
+#[derive(Deserialize)]
+struct AudioQuery {
+    download: Option<String>,
+}
+
+async fn generation_audio(
+    State(state): State<AppState>,
+    UrlPath(id): UrlPath<i64>,
+    Query(query): Query<AudioQuery>,
+    request: Request,
+) -> ApiResult<Response> {
+    let generation = find_generation(&state, id)?;
+    let mut response = serve(&state.0.data_dir.join(&generation.path), request).await?;
+    if query.download.is_some() {
+        let disposition = format!("attachment; filename=\"irodori-{}.wav\"", generation.id);
+        response.headers_mut().insert(
+            header::CONTENT_DISPOSITION,
+            disposition.parse().expect("ascii header"),
+        );
+    }
+    Ok(response)
+}
+
+async fn serve(path: &Path, request: Request) -> ApiResult<Response> {
+    if !path.is_file() {
+        return Err(AppError::new(
+            StatusCode::NOT_FOUND,
+            "音声ファイルが見つかりません。",
+        ));
+    }
+    Ok(ServeFile::new(path)
+        .oneshot(request)
+        .await
+        .map_err(AppError::internal)?
+        .map(Body::new))
+}
+
+async fn delete_generation(
+    State(state): State<AppState>,
+    UrlPath(id): UrlPath<i64>,
+) -> ApiResult<StatusCode> {
+    let path = state
+        .db()
+        .delete_generation(id)?
+        .ok_or_else(|| AppError::new(StatusCode::NOT_FOUND, "生成の記録が見つかりません。"))?;
+    match tokio::fs::remove_file(state.0.data_dir.join(&path)).await {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => state.db().add_file_error(&path, &error.to_string())?,
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn upload_reference(
+    State(state): State<AppState>,
+    mut multipart: Multipart,
+) -> ApiResult<Json<Value>> {
+    let bad = |message: &str| AppError::new(StatusCode::BAD_REQUEST, message);
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|_| bad("音声ファイルを受け取れませんでした。"))?
+    {
+        if field.name() != Some("file") {
+            continue;
+        }
+        let name: String = field
+            .file_name()
+            .unwrap_or("reference")
+            .chars()
+            .filter(|c| !c.is_control())
+            .take(200)
+            .collect();
+        let extension = Path::new(&name)
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(str::to_lowercase)
+            .unwrap_or_default();
+        if !REFERENCE_EXTENSIONS.contains(&extension.as_str()) {
+            return Err(bad(
+                "対応していない形式です。wav・mp3・flac・ogg・opus・m4a・aac・webmの音声を選んでください。",
+            ));
+        }
+        let bytes = field
+            .bytes()
+            .await
+            .map_err(|_| bad("音声ファイルは50MBまでです。"))?;
+        if bytes.is_empty() || bytes.len() > MAX_REFERENCE_BYTES {
+            return Err(bad("音声ファイルは50MBまでです。"));
+        }
+        let relative = format!("references/{}.{extension}", uuid::Uuid::new_v4().simple());
+        let target = state.0.data_dir.join(&relative);
+        let partial = state
+            .0
+            .data_dir
+            .join("tmp")
+            .join(format!("{}.partial", uuid::Uuid::new_v4().simple()));
+        tokio::fs::write(&partial, &bytes).await?;
+        tokio::fs::rename(&partial, &target).await?;
+        let id = state.db().add_reference(&name, &relative);
+        return match id {
+            Ok(id) => Ok(Json(json!({"id": id, "name": name}))),
+            Err(error) => {
+                let _ = tokio::fs::remove_file(&target).await;
+                Err(error.into())
+            }
+        };
+    }
+    Err(bad("音声ファイルを選んでください。"))
+}
+
+async fn reference_audio(
+    State(state): State<AppState>,
+    UrlPath(id): UrlPath<i64>,
+    request: Request,
+) -> ApiResult<Response> {
+    let path = state
+        .db()
+        .reference_path(id)?
+        .ok_or_else(|| AppError::new(StatusCode::NOT_FOUND, "お手本の音声が見つかりません。"))?;
+    serve(&state.0.data_dir.join(path), request).await
+}
+
+fn dictionary_json(state: &AppState) -> ApiResult<Value> {
+    let entries = state.db().dictionary()?;
+    Ok(json!(
+        entries
+            .into_iter()
+            .map(|(word, reading)| json!({"word": word, "reading": reading}))
+            .collect::<Vec<_>>()
+    ))
+}
+
+async fn get_dictionary(State(state): State<AppState>) -> ApiResult<Json<Value>> {
+    Ok(Json(json!({"entries": dictionary_json(&state)?})))
+}
+
+#[derive(Deserialize)]
+struct WordInput {
+    #[serde(default)]
+    word: String,
+    #[serde(default)]
+    reading: String,
+}
+
+async fn put_dictionary(
+    State(state): State<AppState>,
+    Json(input): Json<WordInput>,
+) -> ApiResult<Json<Value>> {
+    let (word, reading) = dictionary::validate(&input.word, &input.reading)
+        .map_err(|message| AppError::new(StatusCode::BAD_REQUEST, message))?;
+    let updated = state.db().put_word(&word, &reading)?;
+    let message = if updated {
+        "読み方を更新しました。"
+    } else {
+        "読み方を登録しました。"
+    };
+    Ok(Json(
+        json!({"message": message, "entries": dictionary_json(&state)?}),
+    ))
+}
+
+async fn delete_dictionary(
+    State(state): State<AppState>,
+    UrlPath(word): UrlPath<String>,
+) -> ApiResult<Json<Value>> {
+    if !state.db().delete_word(&word)? {
+        return Err(AppError::new(
+            StatusCode::NOT_FOUND,
+            "削除する登録を一覧から選んでください。",
+        ));
+    }
+    Ok(Json(
+        json!({"message": "選んだ登録を削除しました。", "entries": dictionary_json(&state)?}),
+    ))
+}
+
+#[derive(Deserialize)]
+struct PreviewInput {
+    #[serde(default)]
+    text: String,
+    #[serde(default = "enabled")]
+    enabled: bool,
+}
+
+fn enabled() -> bool {
+    true
+}
+
+async fn preview_dictionary(
+    State(state): State<AppState>,
+    Json(input): Json<PreviewInput>,
+) -> ApiResult<Json<Value>> {
+    let text = if input.enabled {
+        dictionary::apply(&input.text, &state.db().dictionary()?)
+    } else {
+        input.text
+    };
+    Ok(Json(json!({"text": text})))
+}
+
+async fn unload(State(state): State<AppState>) -> ApiResult<Json<Value>> {
+    state
+        .0
+        .worker
+        .call(&json!({"op": "unload"}))
+        .await
+        .map_err(worker_error)?;
+    Ok(Json(
+        json!({"message": "モデルをメモリから解放しました。次回生成時に再読み込みします。"}),
+    ))
 }
 
 async fn ui(uri: Uri) -> Response {
@@ -104,178 +682,13 @@ async fn healthz() -> &'static str {
     "ok\n"
 }
 
-async fn api_health() -> Json<HealthResponse> {
-    Json(HealthResponse { status: "ok" })
-}
-
-async fn api_items() -> Json<&'static [Item]> {
-    Json(ITEMS)
-}
-
-async fn api_item(UrlPath(id): UrlPath<String>) -> Response {
-    match ITEMS.iter().find(|item| item.id == id) {
-        Some(item) => Json(item).into_response(),
-        None => (StatusCode::NOT_FOUND, "item not found\n").into_response(),
-    }
+async fn api_health() -> Json<Value> {
+    Json(json!({"status": "ok"}))
 }
 
 async fn api_not_found() -> impl IntoResponse {
-    (StatusCode::NOT_FOUND, "API route not found\n")
+    AppError::new(StatusCode::NOT_FOUND, "API route not found")
 }
 
 #[cfg(test)]
-mod tests {
-    use axum::{
-        body::{Body, to_bytes},
-        http::{Request, StatusCode},
-    };
-    use tower::ServiceExt;
-
-    use super::app;
-
-    async fn get(uri: &str) -> axum::response::Response {
-        app()
-            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
-            .await
-            .unwrap()
-    }
-
-    #[tokio::test]
-    async fn ui_is_available_without_a_static_directory() {
-        let response = get("/").await;
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        assert!(body.starts_with(b"<!doctype html>"));
-        assert!(std::str::from_utf8(&body).unwrap().contains("/assets/"));
-    }
-
-    #[tokio::test]
-    async fn compiled_assets_are_served_with_their_content_types() {
-        let response = get("/").await;
-        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        let html = std::str::from_utf8(&body).unwrap();
-        for (attribute, extension, content_type) in [
-            ("src=\"", ".js", "text/javascript"),
-            ("href=\"", ".css", "text/css"),
-        ] {
-            let asset = html
-                .split(attribute)
-                .skip(1)
-                .filter_map(|part| part.split('"').next())
-                .find(|path| path.ends_with(extension))
-                .expect("compiled HTML references its asset");
-            let response = get(asset).await;
-            assert_eq!(response.status(), StatusCode::OK);
-            assert_eq!(response.headers()["content-type"], content_type);
-            let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-            assert!(!body.is_empty());
-            assert!(!body.starts_with(b"<!doctype html>"));
-
-            let response = app()
-                .oneshot(
-                    Request::builder()
-                        .method("HEAD")
-                        .uri(asset)
-                        .body(Body::empty())
-                        .unwrap(),
-                )
-                .await
-                .unwrap();
-            assert_eq!(response.status(), StatusCode::OK);
-            assert_eq!(response.headers()["content-type"], content_type);
-            assert!(
-                to_bytes(response.into_body(), usize::MAX)
-                    .await
-                    .unwrap()
-                    .is_empty()
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn ui_rejects_mutating_requests() {
-        let response = app()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/projects/example")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
-    }
-
-    #[tokio::test]
-    async fn liveness_is_lightweight_plain_text() {
-        let response = get("/healthz").await;
-
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(
-            to_bytes(response.into_body(), usize::MAX).await.unwrap(),
-            "ok\n"
-        );
-    }
-
-    #[tokio::test]
-    async fn api_health_returns_stable_json() {
-        let response = get("/api/health").await;
-
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(
-            to_bytes(response.into_body(), usize::MAX).await.unwrap(),
-            r#"{"status":"ok"}"#
-        );
-    }
-
-    #[tokio::test]
-    async fn api_items_lists_the_demo_fixtures() {
-        let response = get("/api/items").await;
-
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        let body = std::str::from_utf8(&body).unwrap();
-        assert!(body.starts_with('['));
-        assert!(body.contains(r#""id":"theme""#));
-        assert!(body.contains(r#""name""#));
-        assert!(body.contains(r#""updated_at""#));
-    }
-
-    #[tokio::test]
-    async fn api_item_detail_returns_the_matching_item() {
-        let response = get("/api/items/theme").await;
-
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        let body = std::str::from_utf8(&body).unwrap();
-        assert!(body.contains(r#""id":"theme""#));
-        assert!(body.contains(r#""body""#));
-    }
-
-    #[tokio::test]
-    async fn api_item_detail_rejects_unknown_ids() {
-        let response = get("/api/items/missing").await;
-
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
-    }
-
-    #[tokio::test]
-    async fn unknown_api_routes_do_not_fall_back_to_the_spa() {
-        for uri in ["/api", "/api/", "/api/missing"] {
-            let response = get(uri).await;
-
-            assert_eq!(response.status(), StatusCode::NOT_FOUND);
-        }
-    }
-
-    #[tokio::test]
-    async fn unknown_client_routes_return_the_spa_with_success() {
-        let response = get("/projects/example").await;
-
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(response.headers().get("content-type").unwrap(), "text/html");
-        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        assert!(body.starts_with(b"<!doctype html>"));
-    }
-}
+mod tests;

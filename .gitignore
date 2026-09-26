@@ -16,3 +16,4 @@ __pycache__/
 
 /client/test-results/
 /client/playwright-report/
+/data/

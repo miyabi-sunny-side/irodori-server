@@ -6,11 +6,15 @@ export interface RouteMatch {
 interface RouteDef {
   pattern: RegExp;
   params: string[];
+  title: string;
 }
 
+// The index order matches the pages rendered by App.svelte.
 export const routes: RouteDef[] = [
-  { pattern: /^\/$/, params: [] },
-  { pattern: /^\/items\/([^/]+)$/, params: ["id"] },
+  { pattern: /^\/$/, params: [], title: "音声作成" },
+  { pattern: /^\/dictionary$/, params: [], title: "読み辞書" },
+  { pattern: /^\/history$/, params: [], title: "生成履歴" },
+  { pattern: /^\/credits$/, params: [], title: "クレジット・利用条件" },
 ];
 
 export function matchRoute(pathname: string): RouteMatch {

@@ -6,7 +6,11 @@ use std::{
     time::{Duration, Instant},
 };
 
-struct Server(Child);
+// The server creates its data directory under the working directory.
+struct Server(
+    Child,
+    #[expect(dead_code, reason = "held so the directory outlives the server")] tempfile::TempDir,
+);
 
 impl Drop for Server {
     fn drop(&mut self) {
@@ -15,10 +19,14 @@ impl Drop for Server {
     }
 }
 
-fn command() -> Command {
+fn command() -> (Command, tempfile::TempDir) {
+    let dir = tempfile::tempdir().unwrap();
     let mut command = Command::new(env!("CARGO_BIN_EXE_irodori-server"));
-    command.env_remove("PORT").env("LOG_LEVEL", "off");
     command
+        .env_remove("PORT")
+        .env("LOG_LEVEL", "off")
+        .current_dir(dir.path());
+    (command, dir)
 }
 
 #[test]
@@ -29,7 +37,7 @@ fn port_selects_http_listener_and_legacy_address_is_ignored() {
         let reservation = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = reservation.local_addr().unwrap();
         drop(reservation);
-        let mut command = command();
+        let (mut command, dir) = command();
 
         let mut server = Server(
             command
@@ -38,6 +46,7 @@ fn port_selects_http_listener_and_legacy_address_is_ignored() {
                 .stdout(Stdio::null())
                 .spawn()
                 .unwrap(),
+            dir,
         );
         let deadline = Instant::now() + Duration::from_secs(10);
         let mut stream = loop {
@@ -77,7 +86,7 @@ fn invalid_port_fails_startup_with_an_explicit_error() {
         "3000 ",
         "127.0.0.1:3000",
     ] {
-        let mut command = command();
+        let (mut command, dir) = command();
 
         let mut server = Server(
             command
@@ -87,6 +96,7 @@ fn invalid_port_fails_startup_with_an_explicit_error() {
                 .stderr(Stdio::piped())
                 .spawn()
                 .unwrap(),
+            dir,
         );
         let deadline = Instant::now() + Duration::from_secs(5);
         let status = loop {

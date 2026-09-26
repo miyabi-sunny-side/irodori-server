@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Linux launcher for Easy-Irodori-TTS (replaces Easy_irodori_tts.bat / .ps1).
-# Usage: ./irodori.sh [--backend auto|cu128|cpu|xpu] [--host ADDR] [--port N]
+# Usage: ./irodori.sh [setup] [--backend auto|cu128|cpu|xpu] [--host ADDR] [--port N]
+#        "setup" prepares Irodori-TTS and .venv for irodori-server without starting Gradio.
 # Env:   IRODORI_BACKEND (auto), IRODORI_HOST (127.0.0.1), IRODORI_PORT (7860)
 set -euo pipefail
 
@@ -24,13 +25,17 @@ die() {
 }
 
 main() {
-  local backend=${IRODORI_BACKEND:-auto} host=${IRODORI_HOST:-127.0.0.1} port=${IRODORI_PORT:-7860}
+  local backend=${IRODORI_BACKEND:-auto} host=${IRODORI_HOST:-127.0.0.1} port=${IRODORI_PORT:-7860} setup_only=0
+  if [[ ${1:-} == setup ]]; then
+    setup_only=1
+    shift
+  fi
   while (($#)); do
     case $1 in
       --backend) backend=$2 ;;
       --host) host=$2 ;;
       --port) port=$2 ;;
-      *) die "unknown argument: $1 (usage: $0 [--backend auto|cu128|cpu|xpu] [--host ADDR] [--port N])" ;;
+      *) die "unknown argument: $1 (usage: $0 [setup] [--backend auto|cu128|cpu|xpu] [--host ADDR] [--port N])" ;;
     esac
     shift 2
   done
@@ -75,6 +80,10 @@ main() {
   echo "[3/4] 音声ライブラリと GPU を確認しています..."
   "$root/.venv/bin/python" "$root/easy_launcher.py" --check --backend "$backend"
   echo "$backend" >"$root/config/backend.txt"
+  if ((setup_only)); then
+    echo "準備が完了しました ($backend)。"
+    return
+  fi
   echo "[4/4] http://$host:$port で起動します。停止は Ctrl+C です。"
   exec "$root/.venv/bin/python" "$root/easy_launcher.py" --host "$host" --port "$port"
 }

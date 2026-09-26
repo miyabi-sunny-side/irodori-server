@@ -26,6 +26,24 @@ describe("Header menu and theme flow", () => {
     expect(screen.queryByText("トップ")).toBeNull();
   });
 
+  it("lists theme settings first, then the other pages", async () => {
+    render(Header);
+    await fireEvent.click(screen.getByRole("button", { name: "メニュー" }));
+
+    const items = [...screen.getByRole("navigation").children].map((item) =>
+      item.textContent?.trim(),
+    );
+    expect(items).toEqual([
+      "テーマ設定",
+      "読み辞書",
+      "生成履歴",
+      "クレジット・利用条件",
+    ]);
+
+    await fireEvent.click(screen.getByRole("link", { name: "生成履歴" }));
+    expect(screen.queryByRole("navigation")).toBeNull();
+  });
+
   it("the overlay stays out of the tab order", async () => {
     render(Header);
     await fireEvent.click(screen.getByRole("button", { name: "メニュー" }));

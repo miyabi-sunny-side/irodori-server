@@ -85,6 +85,18 @@ const ADOPTED_SHAPES: Record<string, Shape[]> = {
     { tag: "circle", attrs: { cx: "11", cy: "11", r: "8" } },
     { tag: "line", attrs: { x1: "21", y1: "21", x2: "16.65", y2: "16.65" } },
   ],
+  "chevron-up": [{ tag: "polyline", attrs: { points: "18 15 12 9 6 15" } }],
+  "chevron-down": [{ tag: "polyline", attrs: { points: "6 9 12 15 18 9" } }],
+  download: [
+    { tag: "path", attrs: { d: "M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" } },
+    { tag: "polyline", attrs: { points: "7 10 12 15 17 10" } },
+    { tag: "line", attrs: { x1: "12", y1: "15", x2: "12", y2: "3" } },
+  ],
+  upload: [
+    { tag: "path", attrs: { d: "M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" } },
+    { tag: "polyline", attrs: { points: "17 8 12 3 7 8" } },
+    { tag: "line", attrs: { x1: "12", y1: "3", x2: "12", y2: "15" } },
+  ],
   // star and star-filled share one geometry; only the primitive fill
   // differs. The root svg stays fill="none" for every entry.
   star: [

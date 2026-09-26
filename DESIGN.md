@@ -1,11 +1,11 @@
 ---
 version: alpha
-name: Sumi / rust-svelte-template
-description: SumiとKinariを使うWebツールの共通デザイン原本。
+name: Sumi / irodori-server
+description: Irodori-TTSの音声を作って試聴・保存する管理画面のデザイン契約。
 colors:
-  primary: "#9a6a00"
-  accent: "#9a6a00"
-  accent-subtle: "rgba(154, 106, 0, 0.10)"
+  primary: "#1d6f5c"
+  accent: "#1d6f5c"
+  accent-subtle: "rgba(29, 111, 92, 0.10)"
   surface: "#faf6ef"
   surface-raised: "#fffdf8"
   on-surface: "#3a2f28"
@@ -17,8 +17,8 @@ colors:
   danger-subtle: "#f9e9e4"
   wash-base: "#f6efe0"
   wash-raised: "#faf4ea"
-  hover-1: "rgba(154, 106, 0, 0.10)"
-  hover-2: "rgba(154, 106, 0, 0.16)"
+  hover-1: "rgba(29, 111, 92, 0.10)"
+  hover-2: "rgba(29, 111, 92, 0.16)"
 typography:
   title:
     fontFamily: system-ui
@@ -73,6 +73,11 @@ components:
     textColor: "{colors.on-surface}"
     rounded: "{rounded.md}"
     padding: 10px
+  panel:
+    backgroundColor: "{colors.surface-raised}"
+    textColor: "{colors.on-surface}"
+    rounded: "{rounded.lg}"
+    padding: 16px
   button:
     backgroundColor: "{colors.surface-raised}"
     textColor: "{colors.on-surface}"
@@ -89,21 +94,33 @@ components:
     typography: "{typography.label}"
     rounded: "{rounded.sm}"
     padding: 8px
-  button-quiet:
-    backgroundColor: "{colors.surface}"
-    textColor: "{colors.muted}"
+  button-danger:
+    backgroundColor: "{colors.danger-subtle}"
+    textColor: "{colors.danger}"
+    typography: "{typography.label}"
     rounded: "{rounded.sm}"
+    padding: 8px
   icon-button:
     backgroundColor: "{colors.surface-raised}"
     textColor: "{colors.on-surface}"
     rounded: "{rounded.sm}"
     size: 36px
+  field-help:
+    backgroundColor: "{colors.surface-raised}"
+    textColor: "{colors.muted}"
+    typography: "{typography.caption}"
   input:
     backgroundColor: "{colors.surface}"
     textColor: "{colors.on-surface}"
     typography: "{typography.body}"
     rounded: "{rounded.sm}"
     padding: 8px
+  emoji-button:
+    backgroundColor: "{colors.surface}"
+    textColor: "{colors.on-surface}"
+    typography: "{typography.body-sm}"
+    rounded: "{rounded.sm}"
+    padding: 4px
   modal:
     backgroundColor: "{colors.surface-raised}"
     textColor: "{colors.on-surface}"
@@ -126,31 +143,24 @@ components:
   spinner:
     textColor: "{colors.accent}"
     size: 18px
-  badge:
-    backgroundColor: "{colors.surface-raised}"
-    textColor: "{colors.muted}"
-    typography: "{typography.caption}"
-    rounded: "{rounded.full}"
-    padding: 4px
 ---
 
-# rust-svelte-template
+# irodori-server
 
 ## Overview
 
-Sumi familyの共通デザイン原本と、動くRust + Svelteのひな形を提供する。
-日常的に使う道具として、内容を主役にし、操作部品は必要な場所に置く。
-情報を足す前に、既存の表示で分かるか、操作時だけ示せば足りるかを判断する。
+Irodori-TTSで音声を作り、ブラウザで試聴して保存する家庭内LAN向けの管理画面。
+利用者は別のマシンのブラウザから使い、主操作は「音声を生成する」である。
+利用者は先にEasy-Irodori-TTS v1.1 (Gradio版) を使った。画面の流れと用語はそれに合わせ、
+「① モデル・声を選ぶ → ② 文章・絵文字を入力 → ③ 音声を生成・保存」を保つ。
+入力欄の名前、入力例、説明文もGradio版の文言を使う。
 
-派生製品は本書を取り込み、目的・画面・データに合わせて編集する。
-アクセントの明暗の組と `rust-svelte-template:theme` の保存キーは製品固有に変える。
-採用後は各製品のroot DESIGN.mdを正とし、原本の更新を自動で上書きしない。
-使わない部品や説明例を残さず、外部の文書なしで実装判断ができる規則を残す。
+この文書はrust-svelte-templateのDESIGN.md (2026-09-26参照) を取り込んだ製品の契約である。
+採用後は本書を正とし、原本の更新は差分を確認して明示的に取り込む。
 
 ## Colors
 
 暗色はSumi、通常画面の明色はKinariとする。Sumiから設計し、両方で検証する。
-Washiはe-paperを実際に扱う派生製品がKinariと置き換える。2つの明色テーマを重ねない。
 色は `client/src/global.sass` のCSS変数を使う。frontmatterはKinariの値を持つ。
 
 | 役割 | Kinari | Sumi |
@@ -160,137 +170,168 @@ Washiはe-paperを実際に扱う派生製品がKinariと置き換える。2つ�
 | on-surface | #3a2f28 | #e6e6e6 |
 | muted | #6f6257 | #9a9a9a |
 | border | #e3d9c9 | #333333 |
-| accent / primary | #9a6a00 | #e0a800 |
-| accent-subtle | rgba(154,106,0,.10) | rgba(224,168,0,.15) |
+| accent / primary | #1d6f5c | #3cc4a4 |
+| accent-subtle | rgba(29,111,92,.10) | rgba(60,196,164,.15) |
 | link | #14506e | #7fdbff |
 | danger | #9c2b1d | #ff6b6b |
 | danger-subtle | #f9e9e4 | #3a1a1a |
 | scrim | rgba(58,47,40,.4) | rgba(0,0,0,.6) |
 | wash-base | #f6efe0 | #232323 |
 | wash-raised | #faf4ea | #191919 |
-| hover-1 | rgba(154,106,0,.10) | #333333 |
-| hover-2 | rgba(154,106,0,.16) | #3d3d3d |
+| hover-1 | rgba(29,111,92,.10) | #333333 |
+| hover-2 | rgba(29,111,92,.16) | #3d3d3d |
 
+アクセントは「彩り」から採った青緑とする。主ボタンの文字 (surface-raised) との比は
+Kinari 5.9:1、Sumi 7.2:1である。surface上の文字ではKinari 5.6:1、Sumi 8.1:1となる。
 `primary` はlint用に `accent` と同値を持つ。製品の色名はaccentを使う。
-背景・補助情報・通常操作は無彩色を基本とする。Kinariでは表の淡い色を許す。
-帯にはwash、ホバーにはhoverの変数を使い、accent-subtleを直接流用しない。
-アクセントは主操作・フォーカス・小さな選択表示・処理中のスピナーに使う。
-塗りつぶす主操作は画面に最大1つとし、領域を分けて増やさない。
-大きな選択行は背景の濃淡で示し、強いアクセントの面と縁取りを重ねない。
-小さなラジオの選択表示にはaccent-subtleを使える。
 
-副アクセントは、主アクセントと異なる持続的な役割がある場合だけ製品側で定める。
-分類などのデータ色は操作の色と分け、製品側で用途を定める。
-色の意味は文字・形・アクセシビリティ属性でも示す。
-通常文字は両テーマでWCAG AAの4.5:1以上を保つ。主ボタンの文字色はsurface-raisedとする。
+背景・補助情報・通常操作は無彩色を基本とする。帯にはwash、ホバーにはhoverの変数を使う。
+アクセントは主操作・フォーカス・小さな選択表示・処理中のスピナー・スライダーのつまみに使う。
+塗りつぶす主操作は画面に最大1つとする。音声作成は「音声を生成する」、読み辞書は「登録・更新」。
+削除の確定だけはdanger-subtleの面とdangerの文字で示し、主操作の塗りと区別する。
+色の意味は文字・形・アクセシビリティ属性でも示す。通常文字は両テーマで4.5:1以上とする。
 
 ### テーマの状態
 
 `:root` をSumiの値と `color-scheme: dark` にする。
 `data-theme="light"` でKinari、`data-theme="dark"` でSumiを明示指定する。
-自動では属性と保存キーを削除し、OSの `prefers-color-scheme` に従う。
+自動では属性と保存キー `irodori-server:theme` を削除し、OSの `prefers-color-scheme` に従う。
 Kinariの明示指定とOS委任は同じSass mixinから出力し、`color-scheme: light` を設定する。
-設定はlocalStorageへ保存し、初回描画前に適用する。状態をコンポーネント内だけに保持しない。
+設定はlocalStorageへ保存し、`index.html` の小さなscriptで初回描画前に適用する。
 
 ## Typography
 
 書体はsystem-uiとし、Webフォントを追加しない。サイズ・太さ・行高はfrontmatterの5役割を使う。
-タイトルは1行で省略し、本文は16px以上とする。補助文は14px、ラベルは15px、注記は12pxを使う。
-注記はデータ色を持つ場合を除いてmutedとする。階層は色と太さで示し、独自サイズを増やさない。
+パネルの見出し (①②③) とページ見出しはtitle、入力欄の名前はlabel、
+入力欄の下の説明はcaptionのmutedとする。文章入力と音声の文字は本文16pxを保つ。
 
 ## Layout
 
-### 内容と補助情報
+### 画面とURL
 
-一覧や本文を最初の画面で見せる。現在地・選択対象・件数が既存の表示で分かるなら、説明帯を追加しない。
-検索・主要操作は見出しの近くへまとめ、ヘルプ・確認・詳細説明は必要な操作から開く。
-異常時の通知は必要だが、通常時に空の通知領域を予約しない。
+| URL | 画面 | 内容 |
+|---|---|---|
+| `/` | 音声作成 | ①②③の3パネル、生成設定、詳細設定、実行記録 |
+| `/dictionary` | 読み辞書 | 登録・更新の入力、登録済みの一覧 |
+| `/history` | 生成履歴 | 保存された生成の一覧 (新しい順) |
+| `/credits` | クレジット・利用条件 | 制作者、エンジン、モデル、ライセンス、禁止事項 |
 
-縦方向はページの通常スクロールを使う。表の列見出しも行と一緒に流す。
-固定見出しのための内側縦スクロール、高さ制限、残り高さの計算を標準の一覧へ持ち込まない。
-狭幅の表は必要な横スクロールだけを表内へ収める。
-カード向けの幅を密な表や全画面の画像へ適用しない。製品ごとの用途をroot DESIGN.mdで定める。
+- app headerは全幅・高さ48px・stickyで、wash-baseと1pxの下境界を使う。
+  左に音声作成へ戻るアプリ名、右に36pxのメニューボタンだけを置く。
+- sub-headerは高さ40px・header下にsticky、wash-raisedと1pxの下境界で、
+  現在の画面名だけを1行で示す。ボタンやリンクを置かない。
+- 本文は通常の文書フローで続き、mainに独立した縦スクロール領域を作らない。
+  左右の余白は12px、上下は狭幅16px・広幅24px。幅320px以上で横にはみ出さない。
 
-### ひな形の画面構成
+### 音声作成
 
-- app headerは全幅・高さ48px・stickyとし、wash-baseと1pxの下境界を使う。
-  左にホームへ戻るアプリ名、右に36pxのメニューボタンを置く。リンクはアプリ名だけとする。
-- 詳細のsub-headerは高さ40pxで、wash-raisedと1pxの下境界を使う。
-  現在の項目名だけを1行で示し、ボタンやリンクを置かない。既存のheader下への固定を保つ。
-- 本文は通常の文書フローで続く。mainに独立した縦スクロール領域を作らない。
+入力の状態は画面を移っても保つ (モジュールの状態に置く)。生成中に読み辞書へ移っても
+生成は続き、戻ると結果が表示される。
 
-これらの既存headerは、表の列見出しとは別の部品である。
-ブレークポイントは768px。カード・本文の列は中央配置で最大720pxとする。
-左右の余白は12px、上下は狭幅16px・広幅24pxとする。幅320px以上でページを横にはみ出させない。
-余白は4/8/12/16/24pxを使う。カード内10px、通常ボタンの横14pxは部品固有の値とする。
+- 幅1100px以上では3パネルを横に並べ、列の比は3:5:3、間隔16px、最大幅1440pxとする。
+  1440×900で①②③の主要項目と「音声を生成する」がスクロールなしで見える。
+- 1100px未満は①②③を縦に並べ、最大幅720pxの中央1列とする。
+- パネルはsurface-raised、1px枠、12px角丸、16px余白で、見出し「① モデル・声を選ぶ」
+  「② 文章・絵文字を入力」「③ 音声を生成・保存」を持つ。
+- ①: 使うモデル、声の作り方、(クローン系) お手本の音声、(デザイン系) 声・話し方の説明と
+  説明の入力例、読み辞書を使うチェックと読み辞書へのリンク。
+  声の作り方に不要な入力欄は表示しない。
+- ②: 読み上げる文章 (6行)、絵文字の案内1行、絵文字の分類タブ、
+  「読み辞書を反映した文章を確認」。確認結果は押した後にだけ表示する。
+- ③: 「音声を生成する」、現在の状態、(候補2件以上) 聞き比べる音声、音声プレーヤー、
+  再生音量、「WAVをダウンロード」、生成履歴へのリンク。
+  音声が無い間はプレーヤーとダウンロードを表示しない。
+- パネルの下に「生成設定」「詳細設定（通常は変更不要）」「実行記録（問い合わせ用）」を
+  閉じた `details` で置く。開くと入力欄が2列 (768px未満は1列) で並ぶ。
+
+### 読み辞書・生成履歴・クレジット
+
+最大幅720pxの中央1列とする。
+
+- 読み辞書: 表記と読み方の入力 (768px以上は横並び)、入力例、「登録・更新」、結果の文、
+  登録済みの表 (表記・読み方・編集・削除)、置き換えのルールの説明の順。
+- 生成履歴: カードの1列。各カードに文章 (2行で省略)、日時・声の作り方・モデル・話速、
+  プレーヤー、ダウンロード、削除を置く。削除できなかったファイルがあるときだけ、
+  一覧の前にerror-bannerで示す。
+- クレジット: Gradio版のクレジットタブと同じ内容を見出しと箇条書きで示す。
 
 ## Elevation & Depth
 
 階層は面の濃淡と1pxの境界で示す。
 影はメニューとモーダルの `0 8px 32px rgba(0,0,0,.25)` だけに使う。
 フォーカスは共通の `:focus-visible` に2pxのaccent色の輪郭と2pxの間隔を設ける。
-ブラウザ既定の輪郭を抑止する場合も、この可視リングを残す。
 
 ## Shapes
 
-角丸は小部品6px、カード8px、モーダルとメニュー12pxとする。
-9999pxは件数と状態のバッジだけに使う。同じ操作部品で角丸を混ぜず、円形ボタンを作らない。
+角丸は小部品6px、カード8px、パネル・モーダル・メニュー12pxとする。
+円形ボタンを作らない。同じ操作部品で角丸を混ぜない。
 
 ## Components
 
 ### アイコン
 
-`client/src/lib/Icon.svelte` を辞書の正とする。絵文字や文字記号をアイコンの代わりに使わない。
-SVGは24×24、currentColorの2px線、丸い端と角、通常は塗りなしとする。
-サイズは1.2emで文字の基準線にそろえる。filled版は同じ形状を塗り、状態は属性でも示す。
-列挙には `ICON_NAMES` を使い、別の手書き一覧を作らない。未使用だけを理由に辞書項目を削らない。
-汎用的な追加は原本の辞書へ採用し、派生製品が明示的に取り込む。実行時依存やsubmoduleは不要。
+`client/src/lib/Icon.svelte` を辞書の正とし、列挙は `ICON_NAMES` を使う。
+絵文字や文字記号をアイコンの代わりに使わない。絵文字パレットの絵文字は入力する内容である。
+SVGは24×24、currentColorの2px線、丸い端と角、1.2emとする。
+この製品では `chevron-up`・`chevron-down`・`download`・`upload` を追加した。
 
 ### メニューとテーマ設定
 
-メニューは右上のボタンに接するドロップダウンとする。
-上端をheader下端、右端をボタン右端へそろえる。最小幅180px、1pxの枠と12pxの角丸を使う。
-背景はsurface-raised、項目は全幅の行とし、余白は上下8px・左右12pxを使う。
-メニューにscrimは付けない。背面の透明な閉じるボタンで外側クリックを受ける。
-Escでも閉じ、フォーカスをメニューボタンへ戻す。開閉は `aria-expanded` に反映する。
-先頭は「テーマ設定」、以降は製品の画面リンクとする。ホーム項目は重複するため置かない。
+メニューは右上のボタンに接するドロップダウンで、上端をheader下端、右端をボタン右端へそろえる。
+最小幅180px、1px枠、12px角丸、surface-raised。項目は上下8px・左右12pxの全幅の行とする。
+項目は「テーマ設定」「読み辞書」「生成履歴」「クレジット・利用条件」の順。
+音声作成はアプリ名から戻るため項目に置かない。
+外側クリック・Escで閉じ、フォーカスをメニューボタンへ戻す。開閉は `aria-expanded` に反映する。
 
-テーマ設定は中央のモーダルで開く。
-自動・ライト・ダークの3つのラジオにmonitor/sun/moonのアイコンを使う。
-選択は即時反映し、確認できるようモーダルを閉じない。
-閉じるボタン・Esc・scrimで閉じ、メニューボタンへフォーカスを戻す。
+テーマ設定は中央のモーダルで、自動・ライト・ダークの3つのラジオにmonitor/sun/moonを使う。
+選択は即時反映し、モーダルは閉じない。閉じるボタン・Esc・scrimで閉じる。
 
-### 一覧と詳細
+### 入力欄
 
-ホームは名前と更新日時を示すカードの1列一覧とする。
-カードはsurface-raised、1pxの枠、8pxの角丸、10pxの内側余白、8pxの間隔を使う。
-各カードから項目の詳細へ移動できるようにする。
-ラベル付きの検索欄「名前で検索」は入力中に、大文字小文字を区別しない部分一致で絞り込む。
-Enterや送信は不要。消去で全件へ戻し、タブが再表示された際の再取得でも検索文字を保つ。
-検索アイコンは装飾として隠し、フォーカスや操作を持たせない。
+- ラベルは上に置き、説明はその下のcaptionとし、`aria-describedby` で入力欄へ結ぶ。
+- 入力欄とselectはsurface、1px枠、6px角丸、本文サイズ。フォーカスはaccentの枠と共通リング。
+- スライダーはrangeと数値入力の組とし、どちらを変えても同じ値になる。
+  数値入力は範囲外を範囲内へ丸める。アクセントはrangeのつまみ (`accent-color`) だけに使う。
+- 無効な入力欄は不透明度50%とし、理由を説明文で示す (Swayの調整値など)。
 
-一覧の `data-state` はloading/empty/error/successとする。
-読込中は控えめな14pxの文字とスピナーを示す。
-空の説明と取得失敗を区別し、失敗時にはdanger色の説明と再試行を示す。
-検索の不一致を「一致する項目がありません」と示し、データ自体が空の場合と区別する。
-詳細はタイトルの下に概要・状態・更新日時・本文を置く。状態は枠付きの控えめな注記バッジとする。
-各画面はURLを持ち、再読込で同じ画面に戻る。
+### ボタン
 
-アイコン辞書の詳細は、通常項目の下に非操作の一覧を置く。
-`ICON_NAMES` の各アイコンを36px四方・1px枠・6px角丸で示し、下に注記サイズの名前を置く。
-8pxの間隔で折り返し、buttonやaにせず、Tab移動へ入れない。
+- 通常ボタンはsurface-raised、1px枠、6px角丸、上下8px・左右14px。ホバーはhover-1。
+- 主ボタンはaccentで塗り、文字はsurface-raised。「音声を生成する」はパネル幅いっぱい・高さ44px。
+- 無効時は不透明度50%でポインターを付けない。生成中は「音声を生成する」と
+  モデル解放を無効にし、状態欄にスピナーと「生成しています…」を示す。
+- ダウンロードはボタンの見た目のリンク (`a[download]`) とし、download アイコンを付ける。
 
-### 入力と操作部品
+### 絵文字パレット
 
-- 通常ボタンはsurface-raised、1px枠、6px角丸、上下8px・左右14pxの余白とする。
-  ホバーはhover-1、無効時は不透明度50%でポインターを付けない。
-- 主ボタンはaccentで塗り、静かなアイコンボタンは透明背景とする。
-- 入力欄はsurface、1px枠、6px角丸、本文サイズとする。
-  ラベルは上にmutedの注記で置き、フォーカスはaccent色の枠と共通リングを使う。
-- モーダルは中央配置、12px角丸、16px余白とscrimを使う。
-  閉じるボタン・Esc・scrimで閉じ、内容は内部でスクロールできる最大80dvhとする。
-- 動きは150ms以下の高さ・透明度の変化とスピナーに限る。
-  `prefers-reduced-motion: reduce` では両方を止める。
+- 分類をタブ (`role=tablist`) で切り替え、選んだタブを下線2pxのaccentと太字で示す。
+- 各絵文字は「絵文字 ラベル」のボタンで、surface、1px枠、6px角丸、4px 8pxの余白、
+  6px間隔で折り返す。説明は `title` に入れる。aria-labelは「ラベルの絵文字を挿入」。
+- 押しても文章欄のカーソル位置を保ち、そこへ挿入する。選択中の文字は置き換える。
+  挿入後は文章欄にフォーカスを戻し、カーソルを挿入した絵文字の後ろに置く。
+
+### お手本の音声
+
+「音声ファイルを追加」(upload) でファイルを選ぶと、その場でアップロードする。
+追加した音声は名前を1列に並べる。各行には「上に移動」「下に移動」「削除」のアイコンボタンを置く。
+アップロード中はスピナー、失敗は一覧の下にdangerの文で理由を示し、再度選び直せる。
+
+### 状態と結果
+
+- 状態欄は `role=status` で、通常はmuted、失敗はdangerの文字で示す。
+  失敗の原因は利用者向けの文、詳しい実行記録は「実行記録」を開いて確認する。
+- 再生音量はrange (0〜100%、既定75%) で、`irodori-server:playback-volume` に0〜1で保存する。
+  音声要素の音量だけを変え、WAVは変えない。
+- 候補が2件以上のときだけ「聞き比べる音声」のselect (音声 1, 音声 2 …) を示す。
+
+### 一覧とモーダル
+
+- 生成履歴のカードはsurface-raised、1px枠、8px角丸、10px余白、8px間隔。
+- 一覧の `data-state` はloading/empty/error/successとする。
+  読込中は14pxの文字とスピナー、失敗はdangerの説明と「再読み込み」を示す。
+- 削除は確認のモーダル (幅360px) で、キャンセルと「削除する」(danger) を置く。
+  閉じるボタン・Esc・scrimで閉じ、フォーカスを押したボタンへ戻す。
+- 動きは150ms以下の変化とスピナーに限り、`prefers-reduced-motion: reduce` では止める。
 
 ## Verification
 
@@ -298,27 +339,9 @@ Enterや送信は不要。消去で全件へ戻し、タブが再表示された
 変数の接頭辞は色が `--c-*`、余白が `--sp-1..5`、文字が `--fs-xs..xl`、角丸が `--radius-*` とする。
 `designmd lint` は形式を検査する。UIへの適用は実ブラウザで次を確認する。
 
-- 同じデータ・画面サイズで変更前後を比べ、主要情報の面積と見える件数、色の強さを確認する。
-  新機能が動いても、重複情報や強い装飾で主役が隠れたら修正する。
-- 明暗、320px以上の狭幅、長い名前、空、読込、失敗、検索、キーボードを変更範囲に応じて確認する。
-- Sumiの背景色をrgb(25,25,25)にする。Kinariではrgb(250,246,239)となる。
-  明示指定がOSより優先され、自動へ戻すと属性と保存キーが消える。
-- 375pxのheaderの操作対象はアプリ名とメニューボタンの2つだけとする。
-  メニュー開閉時も横にはみ出さず、パネルの位置は指定する端と±1px以内で一致する。
-- カード・アイコン・フォーカスの寸法、各状態、メニューとモーダルの閉じ方を部品規則と照合する。
-  辞書の表示件数は `ICON_NAMES` と一致し、操作できない項目はフォーカスを持たない。
-
-通常フローと余白は `App.svelte` と `global.sass` の `.content` が所有する。
-密な表は `.content.content-wide` 内の `.table-scroll` にsemantic tableを置く。
-表の最小幅640pxは採用例であり、派生製品の列に合わせて変更する。
-`client/e2e/table.html` は同じstyleを使うテスト専用例で、本番ビルドへ含めない。
-派生時は必要なstyleと検証を明示的に取り込み、製品のデータと操作で確認する。
-
-`npm --prefix client run test:e2e` はChromiumでHomeと表を測る。
-1440×900・1280×720・375×812・320×640の明暗で、本文の内部縦スクロール余地0px、
-ページの横はみ出し0px、wheelで行と列見出しが流れることを確認する。
-100件のfixtureでカード先頭160px以内・完全可視7件以上、表先頭65px以内・15行以上を最低基準とする。
-カードの160pxは48pxのheader・検索欄・余白を含む実測に基づく。
-表の65pxはheaderを含まない単体fixtureの余白と列見出しだけの実測に基づく。
-派生製品は実際のheader・検索欄などを含めて測り直し、その画面の基準を定める。
-通常状態の情報追加でこの領域を削る場合は、説明の重複を先に見直す。
+- `npm --prefix client run test:e2e` はbackendを `page.route` で置き換え、Chromiumで次を測る。
+  音声作成・読み辞書・生成履歴の代表操作、1440×900と390×844の明暗で横はみ出し0px、
+  1440×900で「音声を生成する」が最初の画面に入ること。
+- Sumiの背景色はrgb(25,25,25)、Kinariの背景色はrgb(250,246,239)とする。明示指定がOSより優先される。
+- header内の操作対象はアプリ名とメニューボタンの2つだけとする。
+- 変更時は同じデータと画面サイズで前後を比べ、主要情報の面積と色の強さを確認する。

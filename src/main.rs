@@ -14,7 +14,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let listener = TcpListener::bind(bind_addr).await?;
     info!(%bind_addr, "server listening");
 
-    axum::serve(listener, irodori_server::app())
+    let root = std::env::current_dir()?;
+    let state = irodori_server::AppState::open(irodori_server::Config::from_checkout(&root))?;
+    tokio::spawn({
+        let state = state.clone();
+        async move { state.warm_up().await }
+    });
+    axum::serve(listener, irodori_server::app(state))
         .with_graceful_shutdown(shutdown_signal())
         .await?;
 

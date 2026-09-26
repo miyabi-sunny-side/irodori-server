@@ -2,6 +2,13 @@
   import Icon from "./Icon.svelte";
   import ThemeModal from "./ThemeModal.svelte";
 
+  // 音声作成 is reached from the app name, so it is not repeated here.
+  const PAGES = [
+    ["/dictionary", "読み辞書"],
+    ["/history", "生成履歴"],
+    ["/credits", "クレジット・利用条件"],
+  ] as const;
+
   let menuOpen = $state(false);
   let themeOpen = $state(false);
   let menuButton = $state<HTMLButtonElement | undefined>();
@@ -56,6 +63,11 @@
         <button class="menu-item" type="button" onclick={openTheme}>
           テーマ設定
         </button>
+        {#each PAGES as [href, label] (href)}
+          <a class="menu-item" {href} onclick={() => (menuOpen = false)}
+            >{label}</a
+          >
+        {/each}
       </nav>
     {/if}
   </div>
@@ -123,6 +135,7 @@
     font-size: var(--fs-md)
     font-weight: 500
     text-align: left
+    text-decoration: none
     cursor: pointer
 
     &:hover

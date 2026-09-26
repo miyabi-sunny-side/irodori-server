@@ -35,7 +35,11 @@ function onDocumentClick(event: MouseEvent): void {
   }
   const target = event.target as Element | null;
   const anchor = target?.closest<HTMLAnchorElement>("a[href]");
-  if (!anchor || anchor.target === "_blank") {
+  if (
+    !anchor ||
+    anchor.target === "_blank" ||
+    anchor.hasAttribute("download")
+  ) {
     return;
   }
   const href = anchor.getAttribute("href");

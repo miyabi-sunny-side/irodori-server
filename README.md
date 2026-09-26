@@ -3,8 +3,10 @@
 [Irodori-TTS](https://github.com/Aratako/Irodori-TTS) の音声合成を、Linux マシンで動かして
 ブラウザから試聴・保存するためのサーバーです。
 
-現在の版は、ゆうぷろ氏の Windows 向けアプリ Easy-Irodori-TTS v1.1 を Linux で動くよう移植したものです。
-画面の構成・文言・機能は移植元と同じです。
+画面と機能は、ゆうぷろ氏の Windows 向けアプリ Easy-Irodori-TTS v1.1 に揃えています。
+Rust のサーバーが推論用の Python プロセスを所有してモデルを常駐させ、生成した音声を
+SQLite の記録と WAV ファイルで管理します。過去の生成は履歴の画面から再生・ダウンロード・削除できます。
+移植元をそのまま Linux で動かす Gradio 版も同梱しています。
 
 ## 必要なもの
 
@@ -16,7 +18,30 @@
 - インターネット接続 (初回に Python・ライブラリ・モデルを取得します) と十分なディスク空き容量
 - GPU を使う場合は NVIDIA GPU とドライバー (`nvidia-smi` が動くこと)
 
-## 起動
+## irodori-server の起動
+
+ビルドには Rust 1.96 以降と Node.js 24 が要ります。
+
+```sh
+./irodori.sh setup                # Irodori-TTS と Python 環境を用意する
+npm --prefix client ci
+npm --prefix client run build
+cargo build --release
+PORT=3000 ./target/release/irodori-server
+```
+
+`http://<このマシンのアドレス>:3000` をブラウザで開きます。サーバーは `0.0.0.0` で待ち受けます。
+サーバーは作業ディレクトリ (この checkout) の `irodori_worker.py` を `.venv` の Python で推論プロセスとして起動します。
+記録と音声は `data/` に保存します。推論プロセスが終了しても、次の生成の前に起動し直します。
+
+| 環境変数 | 既定 | 内容 |
+| --- | --- | --- |
+| `PORT` | `3000` | 待ち受けるポート |
+| `LOG_LEVEL` | `info` | `off`・`error`・`warn`・`info`・`debug`・`trace` |
+
+仕組みは [docs/architecture.md](docs/architecture.md)、HTTP API は [docs/api.md](docs/api.md) にあります。
+
+## Gradio 版の起動
 
 ```sh
 ./irodori.sh
@@ -79,11 +104,14 @@ GPU の目安は GTX 16／RTX 20 以降、VRAM 4GB 以上です。AMD 製 GPU �
 | --- | --- |
 | `Irodori-TTS/` | 固定 revision で取得した Irodori-TTS |
 | `.venv/` | Python 3.11 の環境 |
-| `outputs/` | 生成した音声 |
-| `config/` | `backend.txt`・`reading_dictionary.json`・クレジット表示 |
+| `data/` | irodori-server の記録 (`irodori.sqlite3`)・生成した音声・お手本の音声 |
+| `outputs/` | Gradio 版で生成した音声 |
+| `config/` | `backend.txt`・Gradio 版の `reading_dictionary.json`・クレジット表示 |
 | `~/.cache/huggingface/` | 音声モデル (Hugging Face の既定の置き場) |
 
-`Irodori-TTS/`・`.venv/`・`outputs/` と `config/` の生成ファイルは Git で管理しません。
+`Irodori-TTS/`・`.venv/`・`data/`・`outputs/` と `config/` の生成ファイルは Git で管理しません。
+irodori-server は初回起動時に、Gradio 版の `config/reading_dictionary.json` を読み辞書へ取り込みます。
+元の JSON は変更しません。
 削除するときはこのフォルダと、必要なら `~/.cache/huggingface/` のモデルを消します。
 
 ## 移植元と改変点
@@ -106,7 +134,13 @@ GPU の目安は GTX 16／RTX 20 以降、VRAM 4GB 以上です。AMD 製 GPU �
 
 ```sh
 bash tests/launcher_test.sh
+cargo test
+npm --prefix client test
+npm --prefix client run test:e2e
 ```
+
+Rust のテストは推論プロセスの代わりに `tests/support/stub_worker.py` を使うため、`python3` が要ります。
+モデルや GPU は要りません。
 
 ## ライセンスとクレジット
 

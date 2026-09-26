@@ -12,15 +12,15 @@
   --c-muted: #6f6257
   --c-border: #e3d9c9
   --c-scrim: rgba(58, 47, 40, 0.4)
-  --c-accent: #9a6a00
-  --c-accent-subtle: rgba(154, 106, 0, 0.1)
+  --c-accent: #1d6f5c
+  --c-accent-subtle: rgba(29, 111, 92, 0.1)
   --c-link: #14506e
   --c-danger: #9c2b1d
   --c-danger-subtle: #f9e9e4
   --c-wash-base: #f6efe0
   --c-wash-raised: #faf4ea
-  --c-hover-1: rgba(154, 106, 0, 0.1)
-  --c-hover-2: rgba(154, 106, 0, 0.16)
+  --c-hover-1: rgba(29, 111, 92, 0.1)
+  --c-hover-2: rgba(29, 111, 92, 0.16)
 
 :root
   color-scheme: dark
@@ -46,8 +46,8 @@
   --c-muted: #9a9a9a
   --c-border: #333333
   --c-scrim: rgba(0, 0, 0, 0.6)
-  --c-accent: #e0a800
-  --c-accent-subtle: rgba(224, 168, 0, 0.15)
+  --c-accent: #3cc4a4
+  --c-accent-subtle: rgba(60, 196, 164, 0.15)
   --c-link: #7fdbff
   --c-danger: #ff6b6b
   --c-danger-subtle: #3a1a1a
@@ -95,29 +95,6 @@ a
   .content
     padding: var(--sp-5) var(--sp-3)
 
-// Dense lists keep document scrolling; only their horizontal overflow is local.
-.content-wide
-  max-width: none
-
-.table-scroll
-  overflow-x: auto
-
-  table
-    width: 100%
-    min-width: 640px
-    border-collapse: collapse
-    font-size: var(--fs-sm)
-    line-height: 24px
-
-  th, td
-    padding: var(--sp-1) var(--sp-2)
-    border-bottom: 1px solid var(--c-border)
-    text-align: left
-
-  th
-    color: var(--c-muted)
-    font-weight: 500
-
 .btn
   padding: var(--sp-2) 14px
   border: 1px solid var(--c-border)
@@ -129,8 +106,102 @@ a
   line-height: 1.2
   cursor: pointer
 
-.btn:hover
+.btn:hover:not(:disabled)
   background: var(--c-hover-1)
+
+.btn:active:not(:disabled)
+  background: var(--c-hover-2)
+
+.btn:disabled, .icon-btn:disabled
+  opacity: 0.5
+  cursor: default
+
+.btn-primary
+  border-color: var(--c-accent)
+  background: var(--c-accent)
+  color: var(--c-surface-raised)
+
+.btn-primary:hover:not(:disabled)
+  background: var(--c-accent)
+  filter: brightness(1.08)
+
+.btn-danger
+  border-color: var(--c-danger)
+  background: var(--c-danger-subtle)
+  color: var(--c-danger)
+
+.btn-danger:hover:not(:disabled)
+  background: var(--c-danger-subtle)
+  filter: brightness(1.08)
+
+// Form fields (DESIGN.md, 入力欄): label above, caption help below.
+.field
+  display: flex
+  flex-direction: column
+  gap: var(--sp-1)
+  min-width: 0
+
+.field > label, .label
+  font-size: var(--fs-md)
+  font-weight: 500
+  line-height: 1.2
+
+.help
+  margin: 0
+  font-size: var(--fs-xs)
+  line-height: 1.4
+  color: var(--c-muted)
+
+.help.error
+  color: var(--c-danger)
+
+.input
+  width: 100%
+  padding: var(--sp-2)
+  border: 1px solid var(--c-border)
+  border-radius: var(--radius-sm)
+  background: var(--c-surface)
+  color: var(--c-on-surface)
+  font: inherit
+  font-size: var(--fs-lg)
+  line-height: 1.5
+
+.input:focus
+  border-color: var(--c-accent)
+
+.input[readonly]
+  color: var(--c-muted)
+
+textarea.input
+  resize: vertical
+
+.check
+  display: inline-flex
+  align-items: center
+  gap: var(--sp-2)
+  font-size: var(--fs-sm)
+  cursor: pointer
+
+  input
+    width: 18px
+    height: 18px
+    margin: 0
+    accent-color: var(--c-accent)
+
+.error-banner
+  padding: var(--sp-2)
+  border-radius: var(--radius-sm)
+  background: var(--c-danger-subtle)
+  color: var(--c-danger)
+  font-size: var(--fs-sm)
+
+.visually-hidden
+  position: absolute
+  width: 1px
+  height: 1px
+  overflow: hidden
+  clip-path: inset(50%)
+  white-space: nowrap
 
 .icon-btn
   display: inline-flex

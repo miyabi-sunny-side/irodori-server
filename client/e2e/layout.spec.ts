@@ -1,139 +1,85 @@
 import { expect, test } from "@playwright/test";
 
-const items = Array.from({ length: 100 }, (_, i) => ({
-  id: String(i),
-  name: `Item ${i}`,
-  updated_at: "2026-09-11",
-}));
+import { generation, mockBackend } from "./mock";
+
+// Set SHOTS=<dir> to keep full-page screenshots for visual review.
+const shots = process.env.SHOTS;
+
+const LONG_TEXT =
+  "今日はとても良い天気ですね。長い文章でも画面の幅を超えずに折り返されることを確かめるための文章です。".repeat(
+    3,
+  );
 
 for (const viewport of [
   { width: 1440, height: 900 },
-  { width: 1280, height: 720 },
-  { width: 375, height: 812 },
+  { width: 390, height: 844 },
   { width: 320, height: 640 },
 ]) {
   for (const colorScheme of ["dark", "light"] as const) {
-    test(`${viewport.width} ${colorScheme}: cards and table flow with the page`, async ({
+    test(`${viewport.width} ${colorScheme}: pages fit the width`, async ({
       page,
-    }, testInfo) => {
+    }) => {
       await page.setViewportSize(viewport);
       await page.emulateMedia({ colorScheme });
-      await page.route("**/api/items", (route) =>
-        route.fulfill({ json: items }),
-      );
+      await mockBackend(page, {
+        generations: [
+          generation(2, LONG_TEXT, { speed: 1.25 }),
+          ...Array.from({ length: 8 }, (_, i) =>
+            generation(3 + i, `音声 ${i}`),
+          ),
+        ],
+        dictionary: [
+          { word: "Irodori", reading: "いろどり" },
+          { word: "とても長い表記の例".repeat(4), reading: "よみ".repeat(20) },
+        ],
+      });
+
       await page.goto("/");
-      await expect(page.locator(".card")).toHaveCount(100);
-      for (const [url, rowSelector, containerSelector] of [
-        ["/", ".card", ".cards"],
-        ["/e2e/table.html", "tbody tr", ".table-scroll"],
-      ]) {
-        if (url !== "/") await page.goto(url);
-        await expect(page.locator(rowSelector)).toHaveCount(100);
-        const geometry = await page.evaluate(
-          ({ rowSelector, containerSelector }) => {
-            const container = document.querySelector(containerSelector)!;
-            const rows = [...document.querySelectorAll(rowSelector)].map(
-              (row) => row.getBoundingClientRect(),
-            );
-            return {
-              firstTop: rows[0].top,
-              visible: rows.filter(
-                (row) =>
-                  row.top >= (rowSelector === ".card" ? 48 : 0) &&
-                  row.bottom <= innerHeight,
-              ).length,
-              innerScroll: container.scrollHeight - container.clientHeight,
-              documentWidth: document.documentElement.scrollWidth,
-              maxHeight: getComputedStyle(container).maxHeight,
-            };
-          },
-          { rowSelector, containerSelector },
+      const generate = page.getByRole("button", { name: "音声を生成する" });
+      await expect(generate).toBeEnabled();
+      expect(
+        await page.evaluate(
+          () => getComputedStyle(document.body).backgroundColor,
+        ),
+      ).toBe(colorScheme === "dark" ? "rgb(25, 25, 25)" : "rgb(250, 246, 239)");
+      expect(await page.locator("header").locator("a, button").count()).toBe(2);
+      if (shots) {
+        await page.screenshot({
+          path: `${shots}/first-view-${viewport.width}-${colorScheme}.png`,
+        });
+      }
+      if (viewport.width === 1440) {
+        const box = await generate.boundingBox();
+        expect(box!.y + box!.height).toBeLessThanOrEqual(viewport.height);
+      }
+
+      await page.getByLabel("読み上げる文章").fill(LONG_TEXT);
+      await page.getByText("生成設定", { exact: true }).click();
+      await page.getByRole("spinbutton", { name: "生成する候補数" }).fill("2");
+      await page.getByRole("spinbutton", { name: "生成する候補数" }).blur();
+      await generate.click();
+      await expect(page.locator("audio.player")).toBeVisible();
+      await page.getByText("詳細設定（通常は変更不要）").click();
+
+      for (const path of ["/", "/dictionary", "/history", "/credits"]) {
+        if (path !== "/") {
+          await page.goto(path);
+          await expect(page.locator("main")).not.toBeEmpty();
+          await page.waitForLoadState("networkidle");
+        }
+        const width = await page.evaluate(
+          () => document.documentElement.scrollWidth,
         );
-        expect(geometry.documentWidth).toBe(viewport.width);
-        expect(geometry.innerScroll).toBeLessThanOrEqual(1);
-        expect(geometry.maxHeight).toBe("none");
-        expect(geometry.firstTop).toBeLessThanOrEqual(url === "/" ? 160 : 65);
-        expect(geometry.visible).toBeGreaterThanOrEqual(url === "/" ? 7 : 15);
-        await testInfo.attach(`${rowSelector}-geometry`, {
-          body: JSON.stringify(geometry),
-          contentType: "application/json",
-        });
-        await testInfo.attach(`${rowSelector}-screen`, {
-          body: await page.screenshot(),
-          contentType: "image/png",
-        });
-        const first = page.locator(rowSelector).first();
-        const before = (await first.boundingBox())!.y;
-        await page.mouse.move(viewport.width / 2, viewport.height / 2);
-        await page.mouse.wheel(0, 600);
-        await expect
-          .poll(() => page.evaluate(() => scrollY))
-          .toBeGreaterThan(500);
-        expect((await first.boundingBox())!.y).toBeLessThan(before - 500);
-        if (url !== "/") {
-          expect(
-            (await page.locator("th").first().boundingBox())!.y,
-          ).toBeLessThan(0);
-          await expect(page.locator("th").first()).toHaveCSS(
-            "position",
-            "static",
-          );
-          if (viewport.width < 768) {
-            const region = page.getByRole("region");
-            await region.focus();
-            await page.keyboard.press("ArrowRight");
-            await expect
-              .poll(() => region.evaluate((el) => el.scrollLeft))
-              .toBeGreaterThan(0);
-          }
+        expect(width, path).toBe(viewport.width);
+        if (shots) {
+          await page.evaluate(() => window.scrollTo(0, 0));
+          const name = path === "/" ? "create" : path.slice(1);
+          await page.screenshot({
+            path: `${shots}/${name}-${viewport.width}-${colorScheme}.png`,
+            fullPage: true,
+          });
         }
       }
     });
   }
 }
-
-test("long names, focus, search and loading/empty/error keep the list usable", async ({
-  page,
-}) => {
-  await page.setViewportSize({ width: 320, height: 640 });
-  let response: "loading" | "empty" | "error" | "success" = "loading";
-  let release!: () => void;
-  const pending = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  await page.route("**/api/items", async (route) => {
-    if (response === "loading") await pending;
-    await route.fulfill({
-      status: response === "error" ? 500 : 200,
-      json:
-        response === "empty"
-          ? []
-          : [{ ...items[0], name: "LongName".repeat(30) }],
-    });
-  });
-  await page.goto("/");
-  await expect(page.getByText("読み込み中…")).toBeVisible();
-  response = "empty";
-  release();
-  await expect(
-    page.getByText("項目がありません", { exact: true }),
-  ).toBeVisible();
-  response = "error";
-  await page.reload();
-  await expect(page.getByText("読み込みに失敗しました")).toBeVisible();
-  response = "success";
-  await page.getByRole("button", { name: "再試行" }).click();
-  await expect(page.locator(".card")).toHaveCount(1);
-  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBe(
-    320,
-  );
-  const search = page.getByRole("searchbox");
-  await search.focus();
-  await page.keyboard.press("Tab");
-  await expect(page.locator(".card")).toBeFocused();
-  await expect(page.locator(".card")).toHaveCSS("outline-style", "solid");
-  await search.fill("missing");
-  await expect(page.getByRole("status")).toHaveText("一致する項目がありません");
-  await search.fill("");
-  await expect(page.locator(".card")).toHaveCount(1);
-});
