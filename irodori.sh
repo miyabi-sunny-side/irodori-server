@@ -1,8 +1,6 @@
 #!/usr/bin/env bash
-# Linux launcher for Easy-Irodori-TTS (replaces Easy_irodori_tts.bat / .ps1).
-# Usage: ./irodori.sh [setup] [--backend auto|cu128|cpu|xpu] [--host ADDR] [--port N]
-#        "setup" prepares Irodori-TTS and .venv for irodori-server without starting Gradio.
-# Env:   IRODORI_BACKEND (auto), IRODORI_HOST (127.0.0.1), IRODORI_PORT (7860)
+# Prepares the pinned Irodori-TTS checkout and .venv that irodori-server's worker runs in.
+# Usage: ./irodori.sh [--backend auto|cu128|cpu|xpu]   Env: IRODORI_BACKEND (auto)
 set -euo pipefail
 
 REVISION=8224dafb46d0aba89209a8f905f1cb7e3299d9c1
@@ -25,17 +23,11 @@ die() {
 }
 
 main() {
-  local backend=${IRODORI_BACKEND:-auto} host=${IRODORI_HOST:-127.0.0.1} port=${IRODORI_PORT:-7860} setup_only=0
-  if [[ ${1:-} == setup ]]; then
-    setup_only=1
-    shift
-  fi
+  local backend=${IRODORI_BACKEND:-auto}
   while (($#)); do
     case $1 in
       --backend) backend=$2 ;;
-      --host) host=$2 ;;
-      --port) port=$2 ;;
-      *) die "unknown argument: $1 (usage: $0 [setup] [--backend auto|cu128|cpu|xpu] [--host ADDR] [--port N])" ;;
+      *) die "unknown argument: $1 (usage: $0 [--backend auto|cu128|cpu|xpu])" ;;
     esac
     shift 2
   done
@@ -45,18 +37,17 @@ main() {
   for cmd in uv git ffmpeg flock; do
     command -v "$cmd" >/dev/null || die "$cmd が見つかりません。OS のパッケージで入れてください。"
   done
-  mkdir -p "$root/outputs" "$root/config" "$root/temp"
+  mkdir -p "$root/config" "$root/temp"
   exec 9>"$root/temp/launcher.lock"
-  flock -n 9 || die "このフォルダで別の起動スクリプトが動いています。先に停止してください。"
+  flock -n 9 || die "このフォルダで別の準備が動いています。終わるのを待ってください。"
 
   # Process-local settings only. HF models stay in the default ~/.cache/huggingface.
-  export PYTHONNOUSERSITE=1 PYTHONUTF8=1 PYTHONUNBUFFERED=1 EASY_IRODORI_ROOT=$root \
+  export PYTHONNOUSERSITE=1 PYTHONUTF8=1 PYTHONUNBUFFERED=1 \
     UV_PROJECT_ENVIRONMENT=$root/.venv UV_PYTHON_PREFERENCE=only-managed UV_NO_CONFIG=1 \
-    GRADIO_ANALYTICS_ENABLED=False HF_HUB_DISABLE_TELEMETRY=1 DO_NOT_TRACK=1 \
-    WANDB_MODE=disabled GIT_TERMINAL_PROMPT=0
+    HF_HUB_DISABLE_TELEMETRY=1 DO_NOT_TRACK=1 WANDB_MODE=disabled GIT_TERMINAL_PROMPT=0
   unset PYTHONPATH PYTHONHOME VIRTUAL_ENV
 
-  echo "[1/4] Irodori-TTS を固定 revision で用意しています..."
+  echo "[1/3] Irodori-TTS を固定 revision で用意しています..."
   if [[ ! -d $app/.git ]]; then
     if [[ -e $app && -n $(ls -A "$app") ]]; then
       die "Irodori-TTS フォルダが空でも Git checkout でもありません。退避してから再実行してください。"
@@ -75,17 +66,12 @@ main() {
   backend=$(select_backend "$backend" "$saved" "$gpu") ||
     die "backend は auto・cu128・cpu・xpu のいずれかです (config/backend.txt も確認してください)。"
 
-  echo "[2/4] Python 3.11 の環境を用意しています ($backend)..."
+  echo "[2/3] Python 3.11 の環境を用意しています ($backend)..."
   (cd "$app" && uv sync --frozen --no-dev --extra "$backend" --python 3.11)
-  echo "[3/4] 音声ライブラリと GPU を確認しています..."
-  "$root/.venv/bin/python" "$root/easy_launcher.py" --check --backend "$backend"
+  echo "[3/3] 音声ライブラリと GPU を確認しています..."
+  "$root/.venv/bin/python" "$root/irodori_worker.py" --check "$backend"
   echo "$backend" >"$root/config/backend.txt"
-  if ((setup_only)); then
-    echo "準備が完了しました ($backend)。"
-    return
-  fi
-  echo "[4/4] http://$host:$port で起動します。停止は Ctrl+C です。"
-  exec "$root/.venv/bin/python" "$root/easy_launcher.py" --host "$host" --port "$port"
+  echo "準備が完了しました ($backend)。"
 }
 
 if [[ ${BASH_SOURCE[0]} == "$0" ]]; then main "$@"; fi

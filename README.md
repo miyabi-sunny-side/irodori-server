@@ -6,7 +6,6 @@
 画面と機能は、ゆうぷろ氏の Windows 向けアプリ Easy-Irodori-TTS v1.1 に揃えています。
 Rust のサーバーが推論用の Python プロセスを所有してモデルを常駐させ、生成した音声を
 SQLite の記録と WAV ファイルで管理します。過去の生成は履歴の画面から再生・ダウンロード・削除できます。
-移植元をそのまま Linux で動かす Gradio 版も同梱しています。
 
 ## 必要なもの
 
@@ -23,7 +22,7 @@ SQLite の記録と WAV ファイルで管理します。過去の生成は履�
 ビルドには Rust 1.96 以降と Node.js 24 が要ります。
 
 ```sh
-./irodori.sh setup                # Irodori-TTS と Python 環境を用意する
+./irodori.sh                      # Irodori-TTS と Python 環境を用意する
 npm --prefix client ci
 npm --prefix client run build
 cargo build --release
@@ -41,36 +40,15 @@ PORT=3000 ./target/release/irodori-server
 
 仕組みは [docs/architecture.md](docs/architecture.md)、HTTP API は [docs/api.md](docs/api.md) にあります。
 
-## Gradio 版の起動
-
-```sh
-./irodori.sh
-```
-
-初回は Irodori-TTS の取得と Python 環境の構築に時間がかかります。
-`http://127.0.0.1:7860` で待ち受けを始めたら、ブラウザで開きます。ブラウザは自動では開きません。
-停止は起動した端末で Ctrl+C です。
-
-別のマシンのブラウザから使う場合は、LAN から届くアドレスで待ち受けます。
-
-```sh
-./irodori.sh --host 0.0.0.0 --port 7860
-```
-
-| 引数 | 環境変数 | 既定 | 内容 |
-| --- | --- | --- | --- |
-| `--host` | `IRODORI_HOST` | `127.0.0.1` | 待ち受けるアドレス |
-| `--port` | `IRODORI_PORT` | `7860` | 待ち受けるポート |
-| `--backend` | `IRODORI_BACKEND` | `auto` | `auto`・`cu128`・`cpu`・`xpu` |
-
-引数は環境変数より優先します。画面に認証はありません。家庭内 LAN など、信頼できる利用者だけが
-届く範囲で公開してください。
+`irodori.sh` は固定 revision の Irodori-TTS を取得し、Python 3.11 の環境 (`uv sync`) を作り、依存と GPU を検査します。
+初回は時間がかかります。checkout を更新したときも実行し直します。
+画面に認証はありません。家庭内 LAN など、信頼できる利用者だけが届く範囲で公開してください。
 
 ### GPU と CPU
 
 `auto` では、`nvidia-smi` が GPU を返せば CUDA 12.8 版 (`cu128`)、それ以外は CPU 版を使います。
-起動に成功した選択は `config/backend.txt` に保存し、次回の `auto` はそれを使います。
-切り替えるときは `--backend` を指定して起動します。CPU は GPU より生成に時間がかかります。
+検査に通った選択は `config/backend.txt` に保存し、次回の `auto` はそれを使います。
+切り替えるときは `./irodori.sh --backend cpu` のように指定し、サーバーを起動し直します。CPU は GPU より生成に時間がかかります。
 
 GPU の目安は GTX 16／RTX 20 以降、VRAM 4GB 以上です。AMD 製 GPU には対応していません。
 
@@ -84,13 +62,12 @@ GPU の目安は GTX 16／RTX 20 以降、VRAM 4GB 以上です。AMD 製 GPU �
    「WAVをダウンロード」で保存できます。
 
 生成設定の「話速（倍）」で 0.75〜1.50 倍を指定できます。声の高さを保って速度を変え、
-再生・ダウンロードの両方に反映します。速度を変えたファイルは名前に `_speed_` が付き、
-元の音声も残ります。再生音量のスライダーはブラウザに記憶し、WAV の音量は変えません。
+再生・ダウンロードの両方に反映します。再生音量のスライダーはブラウザに記憶し、WAV の音量は変えません。
+生成した音声は「生成履歴」の画面から、後で再生・ダウンロード・削除できます。
 
 ### 読み辞書
 
-「読み辞書」タブで表記と読み方を登録します。登録は `config/reading_dictionary.json` に保存し、
-次回の起動でも使います。音声作成タブの「読み辞書を使う」で使う／使わないを切り替え、
+「読み辞書」の画面で表記と読み方を登録します。登録は `data/irodori.sqlite3` に保存します。音声作成タブの「読み辞書を使う」で使う／使わないを切り替え、
 「読み辞書を反映した文章を確認」で置き換え後の文章を確認できます。
 
 ### 絵文字
@@ -105,11 +82,10 @@ GPU の目安は GTX 16／RTX 20 以降、VRAM 4GB 以上です。AMD 製 GPU �
 | `Irodori-TTS/` | 固定 revision で取得した Irodori-TTS |
 | `.venv/` | Python 3.11 の環境 |
 | `data/` | irodori-server の記録 (`irodori.sqlite3`)・生成した音声・お手本の音声 |
-| `outputs/` | Gradio 版で生成した音声 |
-| `config/` | `backend.txt`・Gradio 版の `reading_dictionary.json`・クレジット表示 |
+| `config/` | `backend.txt`・Gradio 版の `reading_dictionary.json` (取り込み元) |
 | `~/.cache/huggingface/` | 音声モデル (Hugging Face の既定の置き場) |
 
-`Irodori-TTS/`・`.venv/`・`data/`・`outputs/` と `config/` の生成ファイルは Git で管理しません。
+`Irodori-TTS/`・`.venv/`・`data/` と `config/` の生成ファイルは Git で管理しません。
 irodori-server は初回起動時に、Gradio 版の `config/reading_dictionary.json` を読み辞書へ取り込みます。
 元の JSON は変更しません。
 削除するときはこのフォルダと、必要なら `~/.cache/huggingface/` のモデルを消します。
@@ -121,13 +97,15 @@ irodori-server は初回起動時に、Gradio 版の `config/reading_dictionary.
 - sha256: `c38eb15fd2817818613c58a1881fabf119720602f646ad68906cbfbb435301be`
 
 最初の commit に展開したファイルを原本のまま収め、Linux 化の変更は以降の commit にあります。
+その後、画面を Svelte、サーバーを Rust で作り直し、Gradio の画面と起動経路を削除しました。
+画面の流れ・用語・生成設定は移植元に揃えています。
 
 - Windows 用の `Easy_irodori_tts.bat`・`.ps1` を `irodori.sh` に置き換えました。
   uv・git・ffmpeg は OS のものを使い、uv・MinGit・FFmpeg のダウンロードはしません。
   Irodori-TTS は移植元と同じ revision `8224dafb46d0aba89209a8f905f1cb7e3299d9c1` に固定します。
 - モデルの置き場を配置フォルダ内から `~/.cache/huggingface` に変えました。
-- 待ち受けアドレスを指定できるようにし、ブラウザの自動起動をやめました。
 - 話速の変更は `PATH` の `ffmpeg` を使います。
+- 生成した音声と読み辞書は SQLite と WAV ファイルで管理します。
 - 移植元の説明書 (`★最初に読んでね★.txt`) は、Linux の操作に合わせてこの README にまとめました。
 
 ## 開発

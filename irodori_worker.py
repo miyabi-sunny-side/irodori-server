@@ -53,7 +53,24 @@ def generate(upstream, params, out_dir):
     return {"paths": paths, "log": f"{detail}\n\n{timing}", "seed": seed}
 
 
+def check(backend):
+    """Dependency and device check run by irodori.sh before the server uses this environment."""
+    import soundfile  # noqa: F401
+    import torch
+    import torchaudio  # noqa: F401
+    import torchcodec  # noqa: F401
+    if backend == "cu128" and not torch.cuda.is_available():
+        raise SystemExit("CUDA is unavailable. Check the NVIDIA driver or rerun with --backend cpu.")
+    if backend == "xpu" and not torch.xpu.is_available():
+        raise SystemExit("Intel XPU is unavailable. Check the driver or rerun with --backend cpu.")
+    load_upstream()
+    print(f"Dependency check passed. Python: {sys.executable}; PyTorch: {torch.__version__}")
+
+
 def main():
+    if sys.argv[1:2] == ["--check"]:
+        check(sys.argv[2] if len(sys.argv) > 2 else "cpu")
+        return
     protocol = os.fdopen(os.dup(1), "w", encoding="utf-8", buffering=1)
     os.dup2(2, 1)
     sys.stdout = sys.stderr
