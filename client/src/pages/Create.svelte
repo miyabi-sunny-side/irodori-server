@@ -1,8 +1,13 @@
 <script lang="ts">
   import { tick } from "svelte";
 
-  import { api, ApiError, downloadUrl } from "../lib/api";
+  import { api, ApiError, downloadUrl, type Reference } from "../lib/api";
   import { insertText, moveItem } from "../lib/create";
+  import {
+    addReference,
+    groupByCharacter,
+    referenceLabel,
+  } from "../lib/references";
   import Icon from "../lib/Icon.svelte";
   import Slider from "../lib/Slider.svelte";
   import {
@@ -38,6 +43,7 @@
   let previewError = $state("");
   let uploading = $state(false);
   let uploadError = $state("");
+  let savedReferences = $state<Reference[]>([]);
 
   let usesReferences = $derived(form.mode === "clone" || form.mode === "both");
   let usesCaption = $derived(form.mode === "design" || form.mode === "both");
@@ -49,6 +55,27 @@
   $effect(() => {
     void loadInfo();
   });
+
+  // Saved references are listed whenever a voice mode that uses them is shown.
+  $effect(() => {
+    if (usesReferences) {
+      api.references().then(
+        (result) => (savedReferences = result.references),
+        () => (savedReferences = []),
+      );
+    }
+  });
+
+  function pickSaved(event: Event) {
+    const select = event.currentTarget as HTMLSelectElement;
+    const picked = savedReferences.find(
+      (reference) => reference.id === Number(select.value),
+    );
+    select.value = "";
+    if (picked) {
+      create.references = addReference(create.references, picked);
+    }
+  }
 
   async function insertEmoji(emoji: string) {
     const area = textArea;
@@ -163,11 +190,12 @@
             <ol class="reference-list" aria-labelledby="references-label">
               {#each create.references as reference, index (reference.id)}
                 <li>
-                  <span class="reference-name">{reference.name}</span>
+                  <span class="reference-name">{referenceLabel(reference)}</span
+                  >
                   <button
                     class="icon-btn"
                     type="button"
-                    aria-label={`${reference.name}を上に移動`}
+                    aria-label={`${referenceLabel(reference)}を上に移動`}
                     disabled={index === 0}
                     onclick={() =>
                       (create.references = moveItem(
@@ -179,7 +207,7 @@
                   <button
                     class="icon-btn"
                     type="button"
-                    aria-label={`${reference.name}を下に移動`}
+                    aria-label={`${referenceLabel(reference)}を下に移動`}
                     disabled={index === create.references.length - 1}
                     onclick={() =>
                       (create.references = moveItem(
@@ -191,7 +219,7 @@
                   <button
                     class="icon-btn"
                     type="button"
-                    aria-label={`${reference.name}を削除`}
+                    aria-label={`${referenceLabel(reference)}を削除`}
                     onclick={() =>
                       (create.references = create.references.filter(
                         (item) => item.id !== reference.id,
@@ -200,6 +228,25 @@
                 </li>
               {/each}
             </ol>
+          {/if}
+          {#if savedReferences.length > 0}
+            <select
+              class="input saved-picker"
+              aria-label="保存したお手本から追加"
+              value=""
+              onchange={pickSaved}
+            >
+              <option value="">保存したお手本から追加…</option>
+              {#each groupByCharacter(savedReferences) as group (group.character)}
+                <optgroup label={group.character}>
+                  {#each group.items as reference (reference.id)}
+                    <option value={String(reference.id)}
+                      >{reference.name}</option
+                    >
+                  {/each}
+                </optgroup>
+              {/each}
+            </select>
           {/if}
           <label class="btn upload" class:busy={uploading}>
             {#if uploading}

@@ -194,6 +194,104 @@ async fn deleting_a_generation_removes_the_record_and_the_file() {
 }
 
 #[tokio::test]
+async fn a_generation_saved_as_a_reference_survives_bulk_deletion() {
+    let server = Server::new();
+    let body = json_body(
+        server
+            .call(
+                "POST",
+                "/api/generate",
+                Some(json!({"text": "候補です。", "num_candidates": 3})),
+            )
+            .await,
+    )
+    .await;
+    let ids: Vec<i64> = body["generations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|g| g["id"].as_i64().unwrap())
+        .collect();
+
+    let bad = server
+        .call(
+            "POST",
+            &format!("/api/generations/{}/reference", ids[1]),
+            Some(json!({"character": " "})),
+        )
+        .await;
+    assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
+    let reference = json_body(
+        server
+            .call(
+                "POST",
+                &format!("/api/generations/{}/reference", ids[1]),
+                Some(json!({"character": " ずんだ "})),
+            )
+            .await,
+    )
+    .await;
+    assert_eq!(reference["character"], "ずんだ");
+    let listed = json_body(server.call("GET", "/api/references", None).await).await;
+    assert_eq!(listed["references"].as_array().unwrap().len(), 1);
+    let saved_audio = server
+        .call("GET", reference["audio_url"].as_str().unwrap(), None)
+        .await;
+    assert!(
+        to_bytes(saved_audio.into_body(), usize::MAX)
+            .await
+            .unwrap()
+            .starts_with(b"RIFF")
+    );
+
+    let cleaned = json_body(server.call("POST", "/api/generations/cleanup", None).await).await;
+    assert_eq!(cleaned["deleted"], 2);
+    let history = json_body(server.call("GET", "/api/generations", None).await).await;
+    assert_eq!(history["generations"].as_array().unwrap().len(), 1);
+    assert_eq!(history["generations"][0]["id"], ids[1]);
+    assert_eq!(history["generations"][0]["saved"], true);
+    assert_eq!(
+        std::fs::read_dir(server.dir.path().join("data/audio"))
+            .unwrap()
+            .count(),
+        1
+    );
+
+    // The reference is a copy: deleting its source generation keeps it playable.
+    server
+        .call("DELETE", &format!("/api/generations/{}", ids[1]), None)
+        .await;
+    let clone = server
+        .call(
+            "POST",
+            "/api/generate",
+            Some(
+                json!({"text": "似せます。", "mode": "clone", "reference_ids": [reference["id"]]}),
+            ),
+        )
+        .await;
+    assert_eq!(clone.status(), StatusCode::OK);
+
+    let restarted = server.restart();
+    let listed = json_body(call(&restarted, "GET", "/api/references", None).await).await;
+    assert_eq!(listed["references"][0]["character"], "ずんだ");
+    let deleted = call(
+        &restarted,
+        "DELETE",
+        &format!("/api/references/{}", reference["id"]),
+        None,
+    )
+    .await;
+    assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
+    assert_eq!(
+        std::fs::read_dir(server.dir.path().join("data/references"))
+            .unwrap()
+            .count(),
+        0
+    );
+}
+
+#[tokio::test]
 async fn invalid_requests_are_rejected_before_the_worker_runs() {
     let server = Server::new();
     for body in [

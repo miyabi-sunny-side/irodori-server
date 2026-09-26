@@ -6,6 +6,7 @@
   const PAGES = [
     ["/dictionary", "読み辞書"],
     ["/history", "生成履歴"],
+    ["/references", "お手本"],
     ["/credits", "クレジット・利用条件"],
   ] as const;
 

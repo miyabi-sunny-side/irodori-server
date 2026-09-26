@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-import { generation, mockBackend } from "./mock";
+import { generation, mockBackend, savedReference } from "./mock";
 
 // Set SHOTS=<dir> to keep full-page screenshots for visual review.
 const shots = process.env.SHOTS;
@@ -23,10 +23,15 @@ for (const viewport of [
       await page.emulateMedia({ colorScheme });
       await mockBackend(page, {
         generations: [
-          generation(2, LONG_TEXT, { speed: 1.25 }),
+          generation(2, LONG_TEXT, { speed: 1.25, saved: true }),
           ...Array.from({ length: 8 }, (_, i) =>
             generation(3 + i, `音声 ${i}`),
           ),
+        ],
+        references: [
+          savedReference(1, "あかり", 2),
+          savedReference(2, "あかり", 3),
+          savedReference(3, "とても長いキャラクター名".repeat(4), 4),
         ],
         dictionary: [
           { word: "Irodori", reading: "いろどり" },
@@ -61,7 +66,7 @@ for (const viewport of [
       await expect(page.locator("audio.player")).toBeVisible();
       await page.getByText("詳細設定（通常は変更不要）").click();
 
-      for (const path of ["/", "/dictionary", "/history", "/credits"]) {
+      for (const path of ["/", "/dictionary", "/history", "/references", "/credits"]) {
         if (path !== "/") {
           await page.goto(path);
           await expect(page.locator("main")).not.toBeEmpty();

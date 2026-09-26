@@ -70,6 +70,8 @@ export interface Generation {
   seed: string | null;
   speed: number;
   audio_url: string;
+  /** Saved as a reference; bulk deletion keeps it. */
+  saved: boolean;
 }
 
 export interface FileError {
@@ -78,9 +80,14 @@ export interface FileError {
   created_at: string;
 }
 
+/** Reference audio for voice cloning. Uploads carry only id and name. */
 export interface Reference {
   id: number;
   name: string;
+  character?: string | null;
+  created_at?: string;
+  source_generation_id?: number | null;
+  audio_url?: string;
 }
 
 export interface DictionaryEntry {
@@ -149,6 +156,19 @@ export const api = {
     ),
   deleteGeneration: (id: number) =>
     request<void>(`/api/generations/${id}`, { method: "DELETE" }),
+  cleanupGenerations: () =>
+    request<{ deleted: number }>("/api/generations/cleanup", {
+      method: "POST",
+    }),
+  saveReference: (generationId: number, character: string) =>
+    request<Reference>(
+      `/api/generations/${generationId}/reference`,
+      sendJson("POST", { character }),
+    ),
+  references: (signal?: AbortSignal) =>
+    request<{ references: Reference[] }>("/api/references", { signal }),
+  deleteReference: (id: number) =>
+    request<void>(`/api/references/${id}`, { method: "DELETE" }),
   uploadReference: (file: File) => {
     const form = new FormData();
     form.append("file", file);

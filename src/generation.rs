@@ -303,6 +303,15 @@ impl GenerateRequest {
     }
 }
 
+/// Trims and checks a character name for a saved reference.
+pub fn character_name(raw: &str) -> Result<String, &'static str> {
+    let name = raw.trim();
+    if name.is_empty() || name.chars().count() > 50 || name.chars().any(char::is_control) {
+        return Err("キャラクター名は1行・50文字までで入力してください。");
+    }
+    Ok(name.to_owned())
+}
+
 /// Puts bf16 first wherever a device offers it, making it the default precision.
 pub fn prefer_bf16(runtime: &mut Runtime) {
     for precisions in runtime.precisions.values_mut() {
@@ -499,6 +508,15 @@ mod tests {
         ];
         expected.sort_unstable();
         assert_eq!(keys, expected);
+    }
+
+    #[test]
+    fn character_names_are_trimmed_single_line_and_limited() {
+        assert_eq!(character_name("  ずんだ  "), Ok("ずんだ".to_owned()));
+        assert_eq!(character_name(&"あ".repeat(50)), Ok("あ".repeat(50)));
+        for bad in ["", "   ", "a\nb", "a\tb", &"あ".repeat(51)] {
+            assert!(character_name(bad).is_err(), "accepted {bad:?}");
+        }
     }
 
     #[test]

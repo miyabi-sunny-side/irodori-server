@@ -37,6 +37,7 @@ describe("Header menu and theme flow", () => {
       "テーマ設定",
       "読み辞書",
       "生成履歴",
+      "お手本",
       "クレジット・利用条件",
     ]);
 

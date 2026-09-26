@@ -143,10 +143,14 @@ pub fn app(state: AppState) -> Router {
             get(get_generation).delete(delete_generation),
         )
         .route("/generations/{id}/audio", get(generation_audio))
+        .route("/generations/{id}/reference", post(save_reference))
+        .route("/generations/cleanup", post(cleanup_generations))
+        .route("/references", get(list_references))
         .route(
             "/references",
             post(upload_reference).layer(DefaultBodyLimit::max(MAX_REFERENCE_BYTES + 64 * 1024)),
         )
+        .route("/references/{id}", delete(delete_reference))
         .route("/references/{id}/audio", get(reference_audio))
         .route("/dictionary", get(get_dictionary).put(put_dictionary))
         .route("/dictionary/preview", post(preview_dictionary))
@@ -403,6 +407,7 @@ async fn synthesize(
             log: log.clone(),
             path: relative,
             audio_url: String::new(),
+            saved: false,
         });
     }
     let saved = state.db().insert_generations(&rows);
@@ -538,12 +543,74 @@ async fn delete_generation(
         .db()
         .delete_generation(id)?
         .ok_or_else(|| AppError::new(StatusCode::NOT_FOUND, "生成の記録が見つかりません。"))?;
-    match tokio::fs::remove_file(state.0.data_dir.join(&path)).await {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => state.db().add_file_error(&path, &error.to_string())?,
-    }
+    remove_recorded(&state, &path).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Removes a file whose record is already gone; a failure is kept in `file_errors`.
+async fn remove_recorded(state: &AppState, path: &str) -> ApiResult<()> {
+    match tokio::fs::remove_file(state.0.data_dir.join(path)).await {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Ok(state.db().add_file_error(path, &error.to_string())?),
+    }
+}
+
+#[derive(Deserialize)]
+struct CharacterInput {
+    #[serde(default)]
+    character: String,
+}
+
+async fn save_reference(
+    State(state): State<AppState>,
+    UrlPath(id): UrlPath<i64>,
+    Json(input): Json<CharacterInput>,
+) -> ApiResult<Json<db::Reference>> {
+    let character = generation::character_name(&input.character)
+        .map_err(|message| AppError::new(StatusCode::BAD_REQUEST, message))?;
+    let generation = find_generation(&state, id)?;
+    let relative = format!("references/{}.wav", uuid::Uuid::new_v4().simple());
+    let target = state.0.data_dir.join(&relative);
+    let partial = state
+        .0
+        .data_dir
+        .join("tmp")
+        .join(format!("{}.partial", uuid::Uuid::new_v4().simple()));
+    tokio::fs::copy(state.0.data_dir.join(&generation.path), &partial).await?;
+    tokio::fs::rename(&partial, &target).await?;
+    let saved = state.db().save_reference(&character, id, &relative);
+    match saved {
+        Ok(reference) => Ok(Json(reference)),
+        Err(error) => {
+            let _ = tokio::fs::remove_file(&target).await;
+            Err(error.into())
+        }
+    }
+}
+
+async fn list_references(State(state): State<AppState>) -> ApiResult<Json<Value>> {
+    Ok(Json(json!({"references": state.db().references()?})))
+}
+
+async fn delete_reference(
+    State(state): State<AppState>,
+    UrlPath(id): UrlPath<i64>,
+) -> ApiResult<StatusCode> {
+    let path = state
+        .db()
+        .delete_reference(id)?
+        .ok_or_else(|| AppError::new(StatusCode::NOT_FOUND, "お手本の音声が見つかりません。"))?;
+    remove_recorded(&state, &path).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn cleanup_generations(State(state): State<AppState>) -> ApiResult<Json<Value>> {
+    let paths = state.db().delete_unsaved_generations()?;
+    for path in &paths {
+        remove_recorded(&state, path).await?;
+    }
+    Ok(Json(json!({"deleted": paths.len()})))
 }
 
 async fn upload_reference(

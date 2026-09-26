@@ -47,6 +47,17 @@ CREATE TABLE file_errors (
 PRAGMA user_version = 1;
 ";
 
+/// Version 2: references saved from the history carry a character name and their source generation.
+const MIGRATE_V2: &str = "
+ALTER TABLE references_audio ADD COLUMN character TEXT;
+ALTER TABLE references_audio ADD COLUMN source_generation_id INTEGER;
+PRAGMA user_version = 2;
+";
+
+/// A generation is kept by bulk deletion while it has been saved as a reference.
+const DELETABLE: &str =
+    "NOT EXISTS (SELECT 1 FROM references_audio r WHERE r.source_generation_id = generations.id)";
+
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Generation {
     pub id: i64,
@@ -65,6 +76,18 @@ pub struct Generation {
     pub log: String,
     #[serde(skip)]
     pub path: String,
+    pub audio_url: String,
+    /// Saved as a reference, so bulk deletion keeps it.
+    pub saved: bool,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub struct Reference {
+    pub id: i64,
+    pub created_at: String,
+    pub name: String,
+    pub character: Option<String>,
+    pub source_generation_id: Option<i64>,
     pub audio_url: String,
 }
 
@@ -97,6 +120,12 @@ impl Db {
                     params![word, reading],
                 )?;
             }
+            tx.commit()?;
+        }
+        let version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if version < 2 {
+            let tx = conn.transaction()?;
+            tx.execute_batch(MIGRATE_V2)?;
             tx.commit()?;
         }
         Ok(Self(conn))
@@ -180,6 +209,7 @@ impl Db {
             saved.push(Generation {
                 id,
                 audio_url: audio_url(id),
+                saved: false,
                 ..row.clone()
             });
         }
@@ -215,6 +245,59 @@ impl Db {
             .optional()
     }
 
+    /// Records a copy of a generation's WAV as a named reference.
+    pub fn save_reference(
+        &self,
+        character: &str,
+        source_generation_id: i64,
+        path: &str,
+    ) -> rusqlite::Result<Reference> {
+        let name = format!("生成 {source_generation_id}");
+        self.0.execute(
+            "INSERT INTO references_audio (created_at, name, path, character, source_generation_id)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![now(), name, path, character, source_generation_id],
+        )?;
+        let id = self.0.last_insert_rowid();
+        self.0.query_row(
+            &format!("{SELECT_REFERENCE} WHERE id = ?1"),
+            [id],
+            reference_row,
+        )
+    }
+
+    /// References saved from the history, grouped by character.
+    pub fn references(&self) -> rusqlite::Result<Vec<Reference>> {
+        let mut stmt = self.0.prepare(&format!(
+            "{SELECT_REFERENCE} WHERE character IS NOT NULL ORDER BY character, id"
+        ))?;
+        stmt.query_map([], reference_row)?.collect()
+    }
+
+    /// Deletes a reference record and returns its file path for the caller to remove.
+    pub fn delete_reference(&self, id: i64) -> rusqlite::Result<Option<String>> {
+        self.0
+            .query_row(
+                "DELETE FROM references_audio WHERE id = ?1 RETURNING path",
+                [id],
+                |row| row.get(0),
+            )
+            .optional()
+    }
+
+    /// Deletes every generation that bulk deletion may remove and returns their file paths.
+    pub fn delete_unsaved_generations(&mut self) -> rusqlite::Result<Vec<String>> {
+        let tx = self.0.transaction()?;
+        let paths = tx
+            .prepare(&format!(
+                "DELETE FROM generations WHERE {DELETABLE} RETURNING path"
+            ))?
+            .query_map([], |row| row.get(0))?
+            .collect::<rusqlite::Result<Vec<String>>>()?;
+        tx.commit()?;
+        Ok(paths)
+    }
+
     pub fn add_file_error(&self, path: &str, error: &str) -> rusqlite::Result<()> {
         self.0.execute(
             "INSERT INTO file_errors (created_at, path, error) VALUES (?1, ?2, ?3)",
@@ -240,7 +323,24 @@ impl Db {
 
 const SELECT_GENERATION: &str =
     "SELECT id, batch, candidate, created_at, text, text_applied, mode, caption,
-    reference_ids, model, seed, speed, params, log, path FROM generations";
+    reference_ids, model, seed, speed, params, log, path,
+    EXISTS (SELECT 1 FROM references_audio r WHERE r.source_generation_id = generations.id)
+    FROM generations";
+
+const SELECT_REFERENCE: &str =
+    "SELECT id, created_at, name, character, source_generation_id FROM references_audio";
+
+fn reference_row(row: &rusqlite::Row) -> rusqlite::Result<Reference> {
+    let id = row.get(0)?;
+    Ok(Reference {
+        id,
+        created_at: row.get(1)?,
+        name: row.get(2)?,
+        character: row.get(3)?,
+        source_generation_id: row.get(4)?,
+        audio_url: format!("/api/references/{id}/audio"),
+    })
+}
 
 fn generation_row(row: &rusqlite::Row) -> rusqlite::Result<Generation> {
     let id = row.get(0)?;
@@ -264,6 +364,7 @@ fn generation_row(row: &rusqlite::Row) -> rusqlite::Result<Generation> {
         log: row.get(13)?,
         path: row.get(14)?,
         audio_url: audio_url(id),
+        saved: row.get(15)?,
     })
 }
 
@@ -303,6 +404,7 @@ mod tests {
             log: "log".into(),
             path: format!("audio/{batch}_{candidate:02}.wav"),
             audio_url: String::new(),
+            saved: false,
         }
     }
 
@@ -392,6 +494,72 @@ mod tests {
         );
         assert_eq!(db.delete_generation(saved[0].id).unwrap(), None);
         assert_eq!(db.generation(saved[0].id).unwrap(), None);
+    }
+
+    #[test]
+    fn a_version_1_database_is_migrated_without_losing_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("v1.sqlite3");
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(SCHEMA).unwrap();
+            conn.execute("INSERT INTO references_audio (created_at, name, path) VALUES ('t', 'up.m4a', 'references/a.m4a')", [])
+                .unwrap();
+            conn.execute(
+                "INSERT INTO dictionary (word, reading) VALUES ('a', 'b')",
+                [],
+            )
+            .unwrap();
+        }
+        let mut db = Db::open(&db_path, &dir.path().join("none.json")).unwrap();
+        db.insert_generations(&[sample("b1", 1)]).unwrap();
+        assert_eq!(
+            db.reference_path(1).unwrap(),
+            Some("references/a.m4a".into())
+        );
+        assert_eq!(db.dictionary().unwrap(), vec![("a".into(), "b".into())]);
+        assert!(
+            db.references().unwrap().is_empty(),
+            "unnamed uploads are not listed as saved references"
+        );
+        let version: i64 =
+            db.0.pragma_query_value(None, "user_version", |row| row.get(0))
+                .unwrap();
+        assert_eq!(version, 2);
+    }
+
+    #[test]
+    fn bulk_deletion_keeps_generations_saved_as_references() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db =
+            Db::open(&dir.path().join("r.sqlite3"), &dir.path().join("none.json")).unwrap();
+        let rows = db
+            .insert_generations(&[sample("b1", 1), sample("b1", 2), sample("b1", 3)])
+            .unwrap();
+        let reference = db
+            .save_reference("ずんだ", rows[1].id, "references/copy.wav")
+            .unwrap();
+        assert_eq!(reference.character.as_deref(), Some("ずんだ"));
+        assert_eq!(reference.source_generation_id, Some(rows[1].id));
+        assert!(db.generation(rows[1].id).unwrap().unwrap().saved);
+
+        let removed = db.delete_unsaved_generations().unwrap();
+        assert_eq!(
+            removed,
+            vec!["audio/b1_01.wav".to_owned(), "audio/b1_03.wav".to_owned()]
+        );
+        let left: Vec<i64> = db.generations().unwrap().iter().map(|g| g.id).collect();
+        assert_eq!(left, vec![rows[1].id]);
+        assert_eq!(db.references().unwrap(), vec![reference.clone()]);
+
+        assert_eq!(
+            db.delete_reference(reference.id).unwrap(),
+            Some("references/copy.wav".into())
+        );
+        assert!(
+            !db.generation(rows[1].id).unwrap().unwrap().saved,
+            "deleting the reference releases the generation"
+        );
     }
 
     #[test]

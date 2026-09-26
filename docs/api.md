@@ -87,7 +87,8 @@ curl -X POST http://<host>:<port>/api/speech -H 'content-type: application/json'
   "text": "Irodoriです。", "text_applied": "いろどりです。",
   "mode": "design", "caption": "...", "reference_ids": [], "model": "Aratako/Irodori-TTS-v4.1-Small",
   "seed": "1989088249105138954", "speed": 1.0, "params": {<生成要求そのもの>},
-  "audio_url": "/api/generations/12/audio"
+  "audio_url": "/api/generations/12/audio",
+  "saved": false
 }
 ```
 
@@ -99,8 +100,27 @@ curl -X POST http://<host>:<port>/api/speech -H 'content-type: application/json'
 
 - `GET /api/generations/{id}` → `Generation`
 - `GET /api/generations/{id}/audio` → `audio/wav`。`?download=1` で添付ファイルとして返します。
+- `saved` はお手本に保存した生成で `true` になります。一括削除はこの生成を残します。
+- `POST /api/generations/cleanup` はお手本に保存していない生成の記録と WAV を消し、`{"deleted": 5}` を返します。
 - `DELETE /api/generations/{id}` → `204`。記録を消してから WAV を消します。
   WAV を消せなかった場合は `file_errors` に残ります。
+
+## お手本
+
+生成履歴の音声に、キャラクター名を付けてお手本 (ボイスクローンの参照音声) として保存できます。
+保存すると WAV を複製するため、元の生成を消してもお手本は残ります。
+
+- `POST /api/generations/{id}/reference` `{"character": "ずんだ"}` で保存し、`Reference` を返します。
+  キャラクター名は 1 行・50 文字までです。
+- `GET /api/references` → 保存したお手本の一覧 (キャラクター名順)。アップロードしただけの参照音声は含みません。
+
+  ```json
+  {"references": [{"id": 5, "created_at": "...", "name": "生成 12", "character": "ずんだ",
+    "source_generation_id": 12, "audio_url": "/api/references/5/audio"}]}
+  ```
+
+- `DELETE /api/references/{id}` → `204`。記録を消してからファイルを消します。
+- お手本の `id` は生成要求の `reference_ids` にそのまま使えます。
 
 ## 参照音声
 

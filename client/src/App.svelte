@@ -6,6 +6,7 @@
   import Credits from "./pages/Credits.svelte";
   import Dictionary from "./pages/Dictionary.svelte";
   import History from "./pages/History.svelte";
+  import References from "./pages/References.svelte";
 
   $effect(() => initRouter());
 
@@ -26,6 +27,8 @@
     <History />
   {:else if router.index === 3}
     <Credits />
+  {:else if router.index === 4}
+    <References />
   {:else}
     <Create />
   {/if}

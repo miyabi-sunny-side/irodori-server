@@ -70,6 +70,16 @@ interface Generation {
   seed: string;
   speed: number;
   audio_url: string;
+  saved: boolean;
+}
+
+export interface SavedReference {
+  id: number;
+  created_at: string;
+  name: string;
+  character: string;
+  source_generation_id: number | null;
+  audio_url: string;
 }
 
 export interface Backend {
@@ -77,6 +87,7 @@ export interface Backend {
   generations: Generation[];
   dictionary: { word: string; reading: string }[];
   fileErrors: { path: string; error: string; created_at: string }[];
+  references: SavedReference[];
   /** Resolve to let a pending POST /api/generate answer. */
   release?: () => void;
   holdGenerate: boolean;
@@ -97,7 +108,23 @@ export function generation(id: number, text: string, extra = {}): Generation {
     seed: "1",
     speed: 1,
     audio_url: `/api/generations/${id}/audio`,
+    saved: false,
     ...extra,
+  };
+}
+
+export function savedReference(
+  id: number,
+  character: string,
+  sourceGenerationId: number | null = null,
+): SavedReference {
+  return {
+    id,
+    created_at: "2026-09-26T04:05:06Z",
+    name: `生成 ${sourceGenerationId ?? id}`,
+    character,
+    source_generation_id: sourceGenerationId,
+    audio_url: `/api/references/${id}/audio`,
   };
 }
 
@@ -110,6 +137,7 @@ export async function mockBackend(
     generations: [],
     dictionary: [],
     fileErrors: [],
+    references: [],
     holdGenerate: false,
     ...initial,
   };
@@ -152,6 +180,55 @@ export async function mockBackend(
         generations: made,
         log: "runtime: reloaded\nseed_used: 1",
       });
+    }
+    if (path === "/api/generations/cleanup" && method === "POST") {
+      const before = backend.generations.length;
+      backend.generations = backend.generations.filter((item) => item.saved);
+      return json(route, { deleted: before - backend.generations.length });
+    }
+    const save = path.match(/^\/api\/generations\/(\d+)\/reference$/);
+    if (save && method === "POST") {
+      const { character } = request.postDataJSON() as { character: string };
+      const name = character.trim();
+      if (!name || [...name].length > 50) {
+        return json(
+          route,
+          { error: "キャラクター名は1行・50文字までで入力してください。" },
+          400,
+        );
+      }
+      const source = backend.generations.find(
+        (item) => item.id === Number(save[1]),
+      );
+      if (source) source.saved = true;
+      const reference = savedReference(nextReference++, name, Number(save[1]));
+      backend.references.push(reference);
+      backend.references.sort(
+        (a, b) => a.character.localeCompare(b.character) || a.id - b.id,
+      );
+      return json(route, reference);
+    }
+    if (path === "/api/references" && method === "GET") {
+      return json(route, { references: backend.references });
+    }
+    const referenceAudio = path.match(/^\/api\/references\/(\d+)\/audio$/);
+    if (referenceAudio) {
+      return route.fulfill({
+        status: 200,
+        headers: { "content-type": "audio/wav" },
+        body: silentWav(),
+      });
+    }
+    const reference = path.match(/^\/api\/references\/(\d+)$/);
+    if (reference && method === "DELETE") {
+      const id = Number(reference[1]);
+      const removed = backend.references.find((item) => item.id === id);
+      backend.references = backend.references.filter((item) => item.id !== id);
+      const source = backend.generations.find(
+        (item) => item.id === removed?.source_generation_id,
+      );
+      if (source) source.saved = false;
+      return route.fulfill({ status: 204 });
     }
     if (path === "/api/generations" && method === "GET") {
       return json(route, {

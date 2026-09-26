@@ -13,6 +13,7 @@ describe("matchRoute", () => {
     expect(matchRoute("/dictionary").index).toBe(1);
     expect(matchRoute("/history").index).toBe(2);
     expect(matchRoute("/credits").index).toBe(3);
+    expect(matchRoute("/references").index).toBe(4);
   });
 
   it("normalizes unknown paths to home", () => {
