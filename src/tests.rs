@@ -123,6 +123,51 @@ async fn generation_is_recorded_with_its_file_and_survives_a_restart() {
 }
 
 #[tokio::test]
+async fn speech_returns_one_recorded_wav() {
+    let server = Server::new();
+    let response = server
+        .call(
+            "POST",
+            "/api/speech",
+            Some(json!({"text": "動画用です。", "num_candidates": 3})),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[header::CONTENT_TYPE], "audio/wav");
+    let id = response.headers()["x-generation-id"]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(response.headers()["x-seed"], "42");
+    let wav = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    assert!(wav.starts_with(b"RIFF"));
+
+    let listed = json_body(server.call("GET", "/api/generations", None).await).await;
+    assert_eq!(
+        listed["generations"].as_array().unwrap().len(),
+        1,
+        "one candidate only"
+    );
+    assert_eq!(listed["generations"][0]["id"].to_string(), id);
+    assert!(
+        listed["generations"][0]["log"]
+            .as_str()
+            .unwrap()
+            .contains("\"compile\": false"),
+        "cpu does not compile"
+    );
+    let stored = server
+        .call("GET", &format!("/api/generations/{id}/audio"), None)
+        .await;
+    assert_eq!(to_bytes(stored.into_body(), usize::MAX).await.unwrap(), wav);
+
+    let invalid = server
+        .call("POST", "/api/speech", Some(json!({"text": ""})))
+        .await;
+    assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn deleting_a_generation_removes_the_record_and_the_file() {
     let server = Server::new();
     let body = json_body(

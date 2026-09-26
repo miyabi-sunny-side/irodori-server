@@ -45,6 +45,9 @@ JSON の API は `/api` 以下にあります。エラーは `4xx`/`5xx` と `{"
 }
 ```
 
+- 省略した項目は既定値になります。`model_device`・`codec_device` は `/api/info` の `devices` の先頭、
+  精度はその機器の `precisions` の先頭です。bf16 を扱える機器 (cuda・xpu) では bf16 が先頭です。
+- cuda では torch.compile を使います (LoRA を指定した要求を除く)。最初の生成はコンパイルのため時間がかかります。
 - `mode`: `design` (caption を使う)・`clone` (`reference_ids` を使う)・`both`・`auto` (文章だけ)。
   使わない側の caption・参照音声は無視します。`clone`・`both` は参照音声が 1 件以上必要です。
 - 範囲: `speed` 0.75〜1.5、`num_steps` 1〜120、`num_candidates` 1〜`max_candidates`、
@@ -56,6 +59,24 @@ JSON の API は `/api` 以下にあります。エラーは `4xx`/`5xx` と `{"
 ```json
 {"generations": [<Generation>, ...], "log": "<詳しい実行記録>"}
 ```
+
+## 動画用の音声
+
+`POST /api/speech` は `/api/generate` と同じ生成要求を受け取り、1 本の WAV をそのまま返します。
+候補数は 1 に固定します。生成は履歴に記録され、`/api/generations/{id}` から後で引けます。
+
+```sh
+curl -X POST http://<host>:<port>/api/speech -H 'content-type: application/json' \
+  -d '{"text": "こんにちは。", "caption": "落ち着いた女性の声で、やわらかく話す。", "seed": "123"}' \
+  -o hello.wav
+```
+
+応答 `200` は `audio/wav` の本体で、次のヘッダーが付きます。エラーは他の API と同じ JSON です。
+
+- `X-Generation-Id`: 生成の記録の ID
+- `X-Seed`: 使ったシード。同じシードと指定で同じ声を作り直せます
+
+1 回の生成で作れる音声は 30 秒までです。長い文章は呼び出し側で文に分けて送ってください。
 
 ## 生成の記録
 

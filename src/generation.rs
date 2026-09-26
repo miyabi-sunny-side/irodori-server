@@ -303,6 +303,47 @@ impl GenerateRequest {
     }
 }
 
+impl GenerateRequest {
+    /// `torch.compile` is used on CUDA; upstream cannot combine it with a `LoRA` adapter.
+    pub fn compile(&self) -> bool {
+        self.model_device == "cuda" && self.lora_adapter_raw.trim().is_empty()
+    }
+}
+
+/// Puts bf16 first wherever a device offers it, making it the default precision.
+pub fn prefer_bf16(runtime: &mut Runtime) {
+    for precisions in runtime.precisions.values_mut() {
+        if let Some(index) = precisions.iter().position(|p| p == "bf16") {
+            let bf16 = precisions.remove(index);
+            precisions.insert(0, bf16);
+        }
+    }
+}
+
+/// Fills omitted device and precision fields from the runtime's first choices.
+pub fn with_runtime_defaults(mut body: Value, runtime: &Runtime) -> Value {
+    let Some(fields) = body.as_object_mut() else {
+        return body;
+    };
+    for (device_key, precision_key) in [
+        ("model_device", "model_precision"),
+        ("codec_device", "codec_precision"),
+    ] {
+        if !fields.contains_key(device_key)
+            && let Some(device) = runtime.devices.first()
+        {
+            fields.insert(device_key.into(), device.as_str().into());
+        }
+        let device = fields[device_key].as_str().unwrap_or_default().to_owned();
+        if !fields.contains_key(precision_key)
+            && let Some(precision) = runtime.precisions.get(&device).and_then(|p| p.first())
+        {
+            fields.insert(precision_key.into(), precision.as_str().into());
+        }
+    }
+    body
+}
+
 /// Maps a worker exception to the Gradio version's user message.
 pub fn error_message(error_type: &str, error: &str) -> &'static str {
     let error = error.to_lowercase();
@@ -465,6 +506,52 @@ mod tests {
         ];
         expected.sort_unstable();
         assert_eq!(keys, expected);
+    }
+
+    #[test]
+    fn compile_only_on_cuda_without_lora() {
+        let mut req = request();
+        assert!(!req.compile(), "cpu");
+        req.model_device = "cuda".into();
+        assert!(req.compile());
+        req.lora_adapter_raw = "/loras/voice".into();
+        assert!(!req.compile(), "lora");
+        req.lora_adapter_raw = "  ".into();
+        assert!(req.compile(), "blank lora");
+    }
+
+    #[test]
+    fn bf16_becomes_the_first_precision_where_offered() {
+        let mut rt = runtime();
+        prefer_bf16(&mut rt);
+        assert_eq!(rt.precisions["cuda"], ["bf16", "fp32"]);
+        assert_eq!(rt.precisions["cpu"], ["fp32"]);
+    }
+
+    #[test]
+    fn omitted_device_fields_take_the_runtime_defaults() {
+        let mut rt = runtime();
+        prefer_bf16(&mut rt);
+        let filled = with_runtime_defaults(json!({"text": "a"}), &rt);
+        assert_eq!(filled["model_device"], "cuda");
+        assert_eq!(filled["codec_device"], "cuda");
+        assert_eq!(filled["model_precision"], "bf16");
+        assert_eq!(filled["codec_precision"], "bf16");
+        let explicit = with_runtime_defaults(
+            json!({"text": "a", "model_device": "cpu", "codec_precision": "fp32"}),
+            &rt,
+        );
+        assert_eq!(explicit["model_device"], "cpu");
+        assert_eq!(
+            explicit["model_precision"], "fp32",
+            "precision follows the chosen device"
+        );
+        assert_eq!(explicit["codec_device"], "cuda");
+        assert_eq!(explicit["codec_precision"], "fp32");
+        assert_eq!(
+            with_runtime_defaults(json!("not an object"), &rt),
+            json!("not an object")
+        );
     }
 
     #[test]

@@ -110,12 +110,13 @@ impl AppState {
                         "推論プロセスを起動できません。サーバーのログを確認してください。",
                     )
                 })?;
-            let runtime: Runtime = serde_json::from_value(reply.clone()).map_err(|_| {
+            let mut runtime: Runtime = serde_json::from_value(reply.clone()).map_err(|_| {
                 AppError::new(
                     StatusCode::SERVICE_UNAVAILABLE,
                     "推論プロセスの応答を読めません。",
                 )
             })?;
+            generation::prefer_bf16(&mut runtime);
             let emojis = reply["emojis"].as_array().cloned().unwrap_or_default();
             *info = Some((runtime, generation::emoji_groups(&emojis)));
         }
@@ -135,6 +136,7 @@ pub fn app(state: AppState) -> Router {
         .route("/health", get(api_health))
         .route("/info", get(info))
         .route("/generate", post(generate))
+        .route("/speech", post(speech))
         .route("/generations", get(list_generations))
         .route(
             "/generations/{id}",
@@ -228,15 +230,52 @@ async fn info(State(state): State<AppState>) -> ApiResult<Json<Value>> {
     })))
 }
 
+/// Parses a generation request, taking omitted device and precision fields from the worker.
+async fn parse_request(state: &AppState, body: Value) -> ApiResult<GenerateRequest> {
+    let (runtime, _) = state.runtime().await?;
+    serde_json::from_value(generation::with_runtime_defaults(body, &runtime)).map_err(|error| {
+        AppError::new(
+            StatusCode::BAD_REQUEST,
+            format!("生成の指定を読めません: {error}"),
+        )
+    })
+}
+
 async fn generate(
     State(state): State<AppState>,
-    Json(request): Json<GenerateRequest>,
+    Json(body): Json<Value>,
 ) -> ApiResult<Json<Value>> {
+    let request = parse_request(&state, body).await?;
     // Run detached so a closed browser tab does not abandon a half-recorded generation.
     tokio::spawn(run_generation(state, request))
         .await
         .map_err(AppError::internal)?
         .map(|(generations, log)| Json(json!({"generations": generations, "log": log})))
+}
+
+/// One WAV for scripts such as video production: a single candidate, recorded like any other.
+async fn speech(State(state): State<AppState>, Json(body): Json<Value>) -> ApiResult<Response> {
+    let mut request = parse_request(&state, body).await?;
+    request.num_candidates = 1;
+    let (generations, _) = tokio::spawn(run_generation(state.clone(), request))
+        .await
+        .map_err(AppError::internal)??;
+    let generation = generations
+        .into_iter()
+        .next()
+        .ok_or_else(|| AppError::internal("worker returned no audio"))?;
+    let audio = tokio::fs::read(state.0.data_dir.join(&generation.path)).await?;
+    let mut response = ([(header::CONTENT_TYPE, "audio/wav")], audio).into_response();
+    let headers = response.headers_mut();
+    headers.insert("x-generation-id", generation.id.into());
+    if let Some(seed) = generation
+        .seed
+        .as_deref()
+        .and_then(|seed| seed.parse().ok())
+    {
+        headers.insert("x-seed", seed);
+    }
+    Ok(response)
 }
 
 async fn run_generation(
@@ -301,7 +340,12 @@ async fn synthesize(
     let reply = state
         .0
         .worker
-        .call(&json!({"op": "generate", "params": request.worker_params(text_applied, references), "out_dir": scratch}))
+        .call(&json!({
+            "op": "generate",
+            "params": request.worker_params(text_applied, references),
+            "compile": request.compile(),
+            "out_dir": scratch,
+        }))
         .await
         .map_err(worker_error)?;
     let produced: Vec<PathBuf> = reply["paths"]

@@ -6,6 +6,7 @@ generates WAVs into the directory it is given.
 """
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 from pathlib import Path
@@ -42,8 +43,19 @@ def info(upstream):
     }
 
 
-def generate(upstream, params, out_dir):
+def use_compile(upstream, enabled):
+    """Make upstream build compiled runtimes; dynamic shapes avoid a recompile per text length."""
+    original = getattr(upstream, "_irodori_build_runtime_key", upstream._build_runtime_key)
+    upstream._irodori_build_runtime_key = original
+    if enabled:
+        upstream._build_runtime_key = lambda **kw: dataclasses.replace(original(**kw), compile_model=True, compile_dynamic=True)
+    else:
+        upstream._build_runtime_key = original
+
+
+def generate(upstream, params, out_dir, compile_model=False):
     count = upstream.MAX_GRADIO_CANDIDATES
+    use_compile(upstream, compile_model)
     # Upstream saves into "gradio_outputs_voicedesign" under the working directory.
     os.chdir(out_dir)
     result = upstream._run_generation(**params)
@@ -82,7 +94,7 @@ def main():
             if op == "info":
                 reply = info(upstream)
             elif op == "generate":
-                reply = generate(upstream, request["params"], request["out_dir"])
+                reply = generate(upstream, request["params"], request["out_dir"], request.get("compile", False))
             elif op == "unload":
                 upstream._clear_runtime_cache()
                 reply = {}

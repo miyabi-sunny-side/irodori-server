@@ -29,7 +29,8 @@ for line in sys.stdin:
                 audio.setframerate(8000)
                 audio.writeframes(b"\0\0" * 800)
             paths.append(path)
-        reply = {"paths": paths, "seed": "42", "log": "stub\n" + json.dumps(params, ensure_ascii=False)}
+        echo = {"params": params, "compile": request.get("compile")}
+        reply = {"paths": paths, "seed": "42", "log": "stub\n" + json.dumps(echo, ensure_ascii=False)}
     elif op == "unload":
         reply = {}
     if "ok" not in reply:

@@ -38,6 +38,8 @@ PORT=3000 ./target/release/irodori-server
 | `PORT` | `3000` | 待ち受けるポート |
 | `LOG_LEVEL` | `info` | `off`・`error`・`warn`・`info`・`debug`・`trace` |
 
+動画制作などのスクリプトからは `POST /api/speech` で文章を送ると WAV が返ります。
+GPU (cuda) では既定で bf16 と torch.compile を使います。起動後やモデル切替後の最初の生成は、コンパイルのため時間がかかります。
 仕組みは [docs/architecture.md](docs/architecture.md)、HTTP API は [docs/api.md](docs/api.md) にあります。
 
 `irodori.sh` は固定 revision の Irodori-TTS を取得し、Python 3.11 の環境 (`uv sync`) を作り、依存と GPU を検査します。
