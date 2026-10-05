@@ -18,7 +18,7 @@ JSON の API は `/api` 以下にあります。エラーは `4xx`/`5xx` と `{"
 }
 ```
 
-`devices`・`precisions`・`emoji_groups` は推論プロセスから取得します。推論プロセスを起動できない場合は `503` です。
+`devices`・`precisions`・`emoji_groups` は推論エンジンから取得します。推論エンジンに届かない場合は `503` です。
 
 ## 生成
 
@@ -163,3 +163,23 @@ POST /api/batches
 ## モデルの解放
 
 `POST /api/unload` → `{"message": "モデルをメモリから解放しました。次回生成時に再読み込みします。"}`
+
+## 推論エンジン
+
+`irodori_engine.py` が `0.0.0.0:${IRODORI_ENGINE_PORT:-7861}` で受ける、irodori-server 向けの内部 API です。
+サーバーは `IRODORI_ENGINE_URL` (既定 `http://127.0.0.1:7861`) へ送ります。認証はありません (level-1)。
+要求はすべて JSON の `POST` で、エンジンは 1 件ずつ順に処理します。
+
+| path | 要求 | 成功時の応答 (`200`) |
+| --- | --- | --- |
+| `/info` | `{}` | `{"devices", "precisions", "max_candidates", "emojis": [{"emoji", "label", "description"}]}` |
+| `/generate` | `{"params": {...}, "references": [{"format": "wav", "data": "<base64>"}]}` | `{"wavs": ["<base64>", ...], "seed": "42", "log": "<実行記録>"}` |
+| `/unload` | `{}` | `{}` |
+
+- 応答には常に `ok` (真偽値) と `engine_log` (その要求の処理中にエンジンが出したログ) が付きます。
+- 失敗時は `500` と `{"ok": false, "error_type": "ValueError", "error": "...", "trace": "<Python の traceback>"}` です。
+  サーバーは `error_type`・`error` を利用者向けの文言に変え、`trace` を生成 API の `502` の `log` に載せます。
+- `params` は upstream `_run_generation` のキーワード引数から `ref_wavs` を除いたものです。
+  エンジンが `references` を一時ファイルに書き、その順で `ref_wavs` に渡します (空なら `null`)。
+  `format` は拡張子で、英小文字と数字の 8 文字までです。
+- `wavs` は生成した候補の WAV の本体で、候補の順に並びます。

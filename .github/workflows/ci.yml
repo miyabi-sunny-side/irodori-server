@@ -59,6 +59,9 @@ jobs:
           shellcheck -x irodori.sh tests/launcher_test.sh
           bash tests/launcher_test.sh
 
+      - name: Test engine request handling
+        run: python3 -m unittest tests/engine_test.py
+
       - name: Check Rust formatting
         run: cargo fmt --check
 

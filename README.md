@@ -4,8 +4,9 @@
 ブラウザから試聴・保存するためのサーバーです。
 
 画面と機能は、ゆうぷろ氏の Windows 向けアプリ Easy-Irodori-TTS v1.1 に揃えています。
-Rust のサーバーが推論用の Python プロセスを所有してモデルを常駐させ、生成した音声を
-SQLite の記録と WAV ファイルで管理します。過去の生成は履歴の画面から再生・ダウンロード・削除できます。
+推論は Python の推論エンジン (`irodori_engine.py`) が HTTP で受け持ってモデルを常駐させ、
+Rust のサーバーが生成した音声を SQLite の記録と WAV ファイルで管理します。
+推論エンジンは別のマシンに置けるため、GPU のないマシンのサーバーから GPU マシンのエンジンを使えます。過去の生成は履歴の画面から再生・ダウンロード・削除できます。
 
 ## 必要なもの
 
@@ -23,6 +24,8 @@ SQLite の記録と WAV ファイルで管理します。過去の生成は履�
 
 ```sh
 ./irodori.sh                      # Irodori-TTS と Python 環境を用意する
+.venv/bin/python irodori_engine.py  # 推論エンジン (別の端末か systemd で動かし続ける)
+
 npm --prefix client ci
 npm --prefix client run build
 cargo build --release
@@ -30,13 +33,26 @@ PORT=3000 ./target/release/irodori-server
 ```
 
 `http://<このマシンのアドレス>:3000` をブラウザで開きます。サーバーは `0.0.0.0` で待ち受けます。
-サーバーは作業ディレクトリ (この checkout) の `irodori_worker.py` を `.venv` の Python で推論プロセスとして起動します。
-記録と音声は `data/` に保存します。推論プロセスが終了しても、次の生成の前に起動し直します。
+記録と音声はサーバーの作業ディレクトリの `data/` に保存します。
 
-| 環境変数 | 既定 | 内容 |
-| --- | --- | --- |
-| `PORT` | `3000` | 待ち受けるポート |
-| `LOG_LEVEL` | `info` | `off`・`error`・`warn`・`info`・`debug`・`trace` |
+推論エンジンは `0.0.0.0:7861` で待ち受け、要求を 1 件ずつ順に処理します。
+サーバーは `IRODORI_ENGINE_URL` のエンジンを呼び、起動・再起動はしません。
+エンジンを止めている間の生成は `503` になり、エンジンを起動し直せば次の生成から使えます。
+別のマシンのエンジンを使うときは、サーバー側に `irodori.sh` の環境は要りません。
+
+```sh
+IRODORI_ENGINE_URL=http://192.168.1.100:7861 PORT=3000 ./target/release/irodori-server
+```
+
+| 環境変数 | 対象 | 既定 | 内容 |
+| --- | --- | --- | --- |
+| `PORT` | サーバー | `3000` | 待ち受けるポート |
+| `LOG_LEVEL` | サーバー | `info` | `off`・`error`・`warn`・`info`・`debug`・`trace` |
+| `IRODORI_ENGINE_URL` | サーバー | `http://127.0.0.1:7861` | 推論エンジンの URL |
+| `IRODORI_ENGINE_PORT` | エンジン | `7861` | エンジンが待ち受けるポート |
+
+推論中にエンジンが出したログ (upstream のログや例外) は応答に載り、呼び出したサーバーのログに書かれます。
+エンジン自体が落ちた原因は、エンジンを動かすマシンの標準エラー (systemd なら journal) に残ります。
 
 動画制作などのスクリプトからは `POST /api/speech` で文章を送ると WAV が返ります。
 GPU (cuda) では既定で bf16 を使います。fp32 より速く、RTX 3060 では 5.5 秒の音声で 2.1 秒から 1.2 秒に縮みます。
@@ -44,13 +60,13 @@ GPU (cuda) では既定で bf16 を使います。fp32 より速く、RTX 3060 �
 
 `irodori.sh` は固定 revision の Irodori-TTS を取得し、Python 3.11 の環境 (`uv sync`) を作り、依存と GPU を検査します。
 初回は時間がかかります。checkout を更新したときも実行し直します。
-画面に認証はありません。家庭内 LAN など、信頼できる利用者だけが届く範囲で公開してください。
+画面と推論エンジンに認証はありません。家庭内 LAN など、信頼できる利用者だけが届く範囲で公開してください。
 
 ### GPU と CPU
 
 `auto` では、`nvidia-smi` が GPU を返せば CUDA 12.8 版 (`cu128`)、それ以外は CPU 版を使います。
 検査に通った選択は `config/backend.txt` に保存し、次回の `auto` はそれを使います。
-切り替えるときは `./irodori.sh --backend cpu` のように指定し、サーバーを起動し直します。CPU は GPU より生成に時間がかかります。
+切り替えるときは `./irodori.sh --backend cpu` のように指定し、推論エンジンを起動し直します。CPU は GPU より生成に時間がかかります。
 
 GPU の目安は GTX 16／RTX 20 以降、VRAM 4GB 以上です。AMD 製 GPU には対応していません。
 
@@ -128,12 +144,13 @@ irodori-server は初回起動時に、Gradio 版の `config/reading_dictionary.
 
 ```sh
 bash tests/launcher_test.sh
+python3 -m unittest tests/engine_test.py
 cargo test
 npm --prefix client test
 npm --prefix client run test:e2e
 ```
 
-Rust のテストは推論プロセスの代わりに `tests/support/stub_worker.py` を使うため、`python3` が要ります。
+Rust のテストは推論エンジンの代わりに同じ HTTP 契約の `tests/support/stub_engine.py` を使うため、`python3` が要ります。
 モデルや GPU は要りません。
 
 ## ライセンスとクレジット

@@ -7,8 +7,8 @@
 
 pub mod db;
 pub mod dictionary;
+pub mod engine;
 pub mod generation;
-pub mod worker;
 
 use std::{
     path::{Path, PathBuf},
@@ -23,6 +23,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{delete, get, post, put},
 };
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tower::ServiceExt;
@@ -30,8 +31,8 @@ use tower_http::{services::ServeFile, trace::TraceLayer};
 
 use crate::{
     db::{Db, Generation},
+    engine::{Engine, EngineError},
     generation::{GenerateRequest, MODELS, MODES, Runtime},
-    worker::{Worker, WorkerError},
 };
 
 static UI: include_dir::Dir<'_> = include_dir::include_dir!("$CARGO_MANIFEST_DIR/client/dist");
@@ -39,24 +40,20 @@ static UI: include_dir::Dir<'_> = include_dir::include_dir!("$CARGO_MANIFEST_DIR
 const MAX_REFERENCE_BYTES: usize = 50 * 1024 * 1024;
 const REFERENCE_EXTENSIONS: &[&str] = &["wav", "mp3", "flac", "ogg", "opus", "m4a", "aac", "webm"];
 
-/// Where the server keeps its files and how it starts the inference worker.
+/// Where the server keeps its files and which inference engine it calls.
 pub struct Config {
     pub data_dir: PathBuf,
     pub legacy_dictionary: PathBuf,
-    pub worker: Worker,
+    pub engine: Engine,
 }
 
 impl Config {
-    /// Layout of a checkout prepared by `irodori.sh setup`, relative to the working directory.
+    /// Files relative to the working directory; the engine from `IRODORI_ENGINE_URL`.
     pub fn from_checkout(root: &Path) -> Self {
         Self {
             data_dir: root.join("data"),
             legacy_dictionary: root.join("config/reading_dictionary.json"),
-            worker: Worker::new(
-                root.join(".venv/bin/python"),
-                vec!["irodori_worker.py".into()],
-                root.into(),
-            ),
+            engine: Engine::from_env(),
         }
     }
 }
@@ -67,7 +64,7 @@ pub struct AppState(Arc<Inner>);
 struct Inner {
     db: Mutex<Db>,
     data_dir: PathBuf,
-    worker: Worker,
+    engine: Engine,
     info: tokio::sync::Mutex<Option<(Runtime, Vec<Value>)>>,
     /// Batch progress lives in memory; the generations themselves are recorded as usual.
     batches: Mutex<Vec<Batch>>,
@@ -96,16 +93,16 @@ impl AppState {
         Ok(Self(Arc::new(Inner {
             db: Mutex::new(db),
             data_dir: config.data_dir,
-            worker: config.worker,
+            engine: config.engine,
             info: tokio::sync::Mutex::new(None),
             batches: Mutex::new(Vec::new()),
         })))
     }
 
-    /// Starts the inference worker and caches its device and emoji lists.
+    /// Caches the engine's device and emoji lists if it is already up.
     pub async fn warm_up(&self) {
         if let Err(error) = self.runtime().await {
-            tracing::warn!(error = error.message, "inference worker is not ready yet");
+            tracing::warn!(error = error.message, "inference engine is not ready yet");
         }
     }
 
@@ -114,11 +111,11 @@ impl AppState {
         if info.is_none() {
             let reply = self
                 .0
-                .worker
-                .call(&json!({"op": "info"}))
+                .engine
+                .call("info", &json!({}))
                 .await
                 .map_err(|error| {
-                    tracing::error!(?error, "inference worker info failed");
+                    tracing::error!(?error, "inference engine info failed");
                     AppError::new(
                         StatusCode::SERVICE_UNAVAILABLE,
                         "推論プロセスを起動できません。サーバーのログを確認してください。",
@@ -258,7 +255,7 @@ async fn info(State(state): State<AppState>) -> ApiResult<Json<Value>> {
     })))
 }
 
-/// Parses a generation request, taking omitted device and precision fields from the worker.
+/// Parses a generation request, taking omitted device and precision fields from the engine.
 async fn parse_request(state: &AppState, body: Value) -> ApiResult<GenerateRequest> {
     let (runtime, _) = state.runtime().await?;
     serde_json::from_value(generation::with_runtime_defaults(body, &runtime)).map_err(|error| {
@@ -291,7 +288,7 @@ async fn speech(State(state): State<AppState>, Json(body): Json<Value>) -> ApiRe
     let generation = generations
         .into_iter()
         .next()
-        .ok_or_else(|| AppError::internal("worker returned no audio"))?;
+        .ok_or_else(|| AppError::internal("engine returned no audio"))?;
     let audio = tokio::fs::read(state.0.data_dir.join(&generation.path)).await?;
     let mut response = ([(header::CONTENT_TYPE, "audio/wav")], audio).into_response();
     let headers = response.headers_mut();
@@ -332,7 +329,7 @@ async fn run_generation(
                         "お手本の音声が見つかりません。もう一度追加してください。",
                     )
                 })?;
-                references.push(data.join(path).display().to_string());
+                references.push(data.join(path));
                 characters.push(character);
             }
         }
@@ -364,28 +361,38 @@ async fn synthesize(
     state: &AppState,
     request: &GenerateRequest,
     text_applied: &str,
-    references: &[String],
+    references: &[PathBuf],
     batch: &str,
     scratch: &Path,
     character: Option<String>,
 ) -> ApiResult<(Vec<Generation>, String)> {
+    let mut sent = Vec::new();
+    for path in references {
+        let format = path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .unwrap_or_default();
+        let data = BASE64.encode(tokio::fs::read(path).await?);
+        sent.push(json!({"format": format, "data": data}));
+    }
     let reply = state
         .0
-        .worker
-        .call(&json!({
-            "op": "generate",
-            "params": request.worker_params(text_applied, references),
-            "out_dir": scratch,
-        }))
+        .engine
+        .call(
+            "generate",
+            &json!({"params": request.engine_params(text_applied), "references": sent}),
+        )
         .await
-        .map_err(worker_error)?;
-    let produced: Vec<PathBuf> = reply["paths"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(Value::as_str)
-        .map(PathBuf::from)
-        .collect();
+        .map_err(engine_error)?;
+    let mut produced = Vec::new();
+    for (index, wav) in reply["wavs"].as_array().into_iter().flatten().enumerate() {
+        let audio = BASE64
+            .decode(wav.as_str().unwrap_or_default())
+            .map_err(AppError::internal)?;
+        let path = scratch.join(format!("engine_{:02}.wav", index + 1));
+        tokio::fs::write(&path, audio).await?;
+        produced.push(path);
+    }
     let log = format!(
         "{}\n話速: {}倍",
         reply["log"].as_str().unwrap_or_default(),
@@ -482,9 +489,9 @@ async fn change_speed(source: &Path, target: &Path, speed: f64) -> std::io::Resu
     }
 }
 
-fn worker_error(error: WorkerError) -> AppError {
+fn engine_error(error: EngineError) -> AppError {
     match error {
-        WorkerError::Failed {
+        EngineError::Failed {
             error_type,
             error,
             trace,
@@ -493,12 +500,15 @@ fn worker_error(error: WorkerError) -> AppError {
             message: generation::error_message(&error_type, &error).into(),
             log: Some(trace),
         },
-        WorkerError::Died => AppError::new(
-            StatusCode::BAD_GATEWAY,
-            "推論プロセスが終了しました。次の生成で自動的に起動し直します。もう一度お試しください。",
-        ),
-        WorkerError::Unavailable(detail) => {
-            tracing::error!(detail, "inference worker unavailable");
+        EngineError::Died(detail) => {
+            tracing::error!(detail, "inference engine stopped replying");
+            AppError::new(
+                StatusCode::BAD_GATEWAY,
+                "推論プロセスとの通信が途中で切れました。サーバーのログを確認して、もう一度お試しください。",
+            )
+        }
+        EngineError::Unavailable(detail) => {
+            tracing::error!(detail, "inference engine unavailable");
             AppError::new(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "推論プロセスを起動できません。サーバーのログを確認してください。",
@@ -919,10 +929,10 @@ async fn preview_dictionary(
 async fn unload(State(state): State<AppState>) -> ApiResult<Json<Value>> {
     state
         .0
-        .worker
-        .call(&json!({"op": "unload"}))
+        .engine
+        .call("unload", &json!({}))
         .await
-        .map_err(worker_error)?;
+        .map_err(engine_error)?;
     Ok(Json(
         json!({"message": "モデルをメモリから解放しました。次回生成時に再読み込みします。"}),
     ))

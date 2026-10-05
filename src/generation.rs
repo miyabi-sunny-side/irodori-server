@@ -1,4 +1,4 @@
-//! Generation requests: validation, the worker's `_run_generation` arguments, and messages.
+//! Generation requests: validation, the engine's `_run_generation` arguments, and messages.
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -163,7 +163,7 @@ impl Default for GenerateRequest {
     }
 }
 
-/// Device choices reported by the worker.
+/// Device choices reported by the engine.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct Runtime {
     pub devices: Vec<String>,
@@ -266,8 +266,9 @@ impl GenerateRequest {
         Ok(())
     }
 
-    /// Keyword arguments for upstream `_run_generation`.
-    pub fn worker_params(&self, text_applied: &str, reference_paths: &[String]) -> Value {
+    /// Keyword arguments for upstream `_run_generation`, except `ref_wavs`, which the engine
+    /// fills with its copies of the references sent beside them.
+    pub fn engine_params(&self, text_applied: &str) -> Value {
         json!({
             "checkpoint": self.model,
             "model_device": self.model_device,
@@ -276,7 +277,6 @@ impl GenerateRequest {
             "codec_precision": self.codec_precision,
             "text": text_applied,
             "caption": if self.uses_caption() { self.caption.as_str() } else { "" },
-            "ref_wavs": if self.uses_references() { json!(reference_paths) } else { Value::Null },
             "num_steps": self.num_steps,
             "num_candidates": self.num_candidates,
             "seed_raw": self.seed,
@@ -378,7 +378,7 @@ pub fn with_runtime_defaults(mut body: Value, runtime: &Runtime) -> Value {
     body
 }
 
-/// Maps a worker exception to the Gradio version's user message.
+/// Maps an engine exception to the Gradio version's user message.
 pub fn error_message(error_type: &str, error: &str) -> &'static str {
     let error = error.to_lowercase();
     if error.contains("out of memory") {
@@ -502,8 +502,8 @@ mod tests {
     }
 
     #[test]
-    fn worker_params_match_the_upstream_signature() {
-        let params = request().worker_params("こんにちは。", &[]);
+    fn engine_params_match_the_upstream_signature_without_ref_wavs() {
+        let params = request().engine_params("こんにちは。");
         let mut keys: Vec<_> = params.as_object().unwrap().keys().cloned().collect();
         keys.sort();
         let mut expected = vec![
@@ -514,7 +514,6 @@ mod tests {
             "codec_precision",
             "text",
             "caption",
-            "ref_wavs",
             "num_steps",
             "num_candidates",
             "seed_raw",
@@ -614,21 +613,19 @@ mod tests {
     }
 
     #[test]
-    fn worker_params_drop_the_unused_voice_inputs() {
-        let refs = vec!["/data/references/a.wav".to_owned()];
+    fn engine_params_drop_the_unused_caption() {
         let mut req = request();
         req.caption = "低い声".into();
         req.reference_ids = vec![1];
-        for (mode, caption, ref_wavs) in [
-            ("design", json!("低い声"), Value::Null),
-            ("clone", json!(""), json!(refs)),
-            ("both", json!("低い声"), json!(refs)),
-            ("auto", json!(""), Value::Null),
+        for (mode, caption) in [
+            ("design", json!("低い声")),
+            ("clone", json!("")),
+            ("both", json!("低い声")),
+            ("auto", json!("")),
         ] {
             req.mode = mode.into();
-            let params = req.worker_params("いろどり", &refs);
+            let params = req.engine_params("いろどり");
             assert_eq!(params["caption"], caption, "{mode}");
-            assert_eq!(params["ref_wavs"], ref_wavs, "{mode}");
             assert_eq!(params["text"], "いろどり");
             assert_eq!(params["checkpoint"], MODELS[0].0);
         }

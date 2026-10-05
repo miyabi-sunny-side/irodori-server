@@ -31,10 +31,14 @@ impl Server {
 }
 
 fn open(dir: &std::path::Path) -> AppState {
+    open_with(dir, crate::engine::stub())
+}
+
+fn open_with(dir: &std::path::Path, engine: crate::engine::Engine) -> AppState {
     AppState::open(Config {
         data_dir: dir.join("data"),
         legacy_dictionary: dir.join("reading_dictionary.json"),
-        worker: crate::worker::stub(),
+        engine,
     })
     .unwrap()
 }
@@ -88,7 +92,7 @@ async fn generation_is_recorded_with_its_file_and_survives_a_restart() {
             .as_str()
             .unwrap()
             .contains("\"text\": \"いろどりです。\""),
-        "worker receives the applied text"
+        "engine receives the applied text"
     );
     assert!(body["log"].as_str().unwrap().contains("話速: 1倍"));
 
@@ -429,7 +433,7 @@ async fn favourites_are_kept_by_bulk_deletion() {
 }
 
 #[tokio::test]
-async fn invalid_requests_are_rejected_before_the_worker_runs() {
+async fn invalid_requests_are_rejected_before_the_engine_runs() {
     let server = Server::new();
     for body in [
         json!({"text": " "}),
@@ -452,12 +456,13 @@ async fn invalid_requests_are_rejected_before_the_worker_runs() {
 }
 
 #[tokio::test]
-async fn a_worker_crash_is_reported_and_the_next_generation_recovers() {
+async fn a_lost_engine_connection_is_reported_and_the_next_generation_succeeds() {
     let server = Server::new();
     let response = server
         .call("POST", "/api/generate", Some(json!({"text": "落ちる"})))
         .await;
     assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    assert!(json_body(response).await["error"].is_string());
     let response = server
         .call("POST", "/api/generate", Some(json!({"text": "戻る"})))
         .await;
@@ -465,7 +470,38 @@ async fn a_worker_crash_is_reported_and_the_next_generation_recovers() {
 }
 
 #[tokio::test]
-async fn uploaded_references_reach_the_worker_in_order() {
+async fn an_engine_exception_returns_its_message_and_trace() {
+    let server = Server::new();
+    let response = server
+        .call("POST", "/api/generate", Some(json!({"text": "失敗"})))
+        .await;
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    let body = json_body(response).await;
+    assert!(body["error"].as_str().unwrap().starts_with("入力値を確認"));
+    assert_eq!(body["log"], "Traceback: seed");
+}
+
+#[tokio::test]
+async fn an_unreachable_engine_returns_the_unavailable_message() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = open_with(dir.path(), crate::engine::Engine::new("http://127.0.0.1:9"));
+    for (method, uri, body) in [
+        ("GET", "/api/info", None),
+        ("POST", "/api/generate", Some(json!({"text": "a"}))),
+    ] {
+        let response = call(&state, method, uri, body).await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE, "{uri}");
+        assert!(
+            json_body(response).await["error"]
+                .as_str()
+                .unwrap()
+                .starts_with("推論プロセスを起動できません")
+        );
+    }
+}
+
+#[tokio::test]
+async fn uploaded_references_reach_the_engine_in_order() {
     let server = Server::new();
     let mut ids = Vec::new();
     for name in ["b.m4a", "a.WAV"] {
@@ -497,9 +533,10 @@ async fn uploaded_references_reach_the_worker_in_order() {
     )
     .await;
     let log = body["log"].as_str().unwrap();
-    let first = log.find(".m4a").unwrap();
-    let second = log.find(".wav").unwrap();
-    assert!(first < second, "reference order is kept: {log}");
+    assert!(
+        log.contains(r#"references: [["m4a", "AUDIO"], ["wav", "AUDIO"]]"#),
+        "reference bodies arrive in order: {log}"
+    );
     assert_eq!(body["generations"][0]["reference_ids"], json!(ids));
     let audio = server
         .call("GET", &format!("/api/references/{}/audio", ids[0]), None)
@@ -602,7 +639,7 @@ async fn dictionary_editing_and_preview() {
 }
 
 #[tokio::test]
-async fn info_lists_models_and_grouped_emojis_from_the_worker() {
+async fn info_lists_models_and_grouped_emojis_from_the_engine() {
     let info = json_body(get("/api/info").await).await;
     assert_eq!(
         info["models"][1]["id"],
@@ -614,7 +651,7 @@ async fn info_lists_models_and_grouped_emojis_from_the_worker() {
 }
 
 #[tokio::test]
-async fn unload_asks_the_worker() {
+async fn unload_asks_the_engine() {
     let response = get("/api/unload").await;
     assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
     let server = Server::new();

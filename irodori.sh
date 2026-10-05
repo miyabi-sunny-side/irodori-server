@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Prepares the pinned Irodori-TTS checkout and .venv that irodori-server's worker runs in.
+# Prepares the pinned Irodori-TTS checkout and .venv that the inference engine (irodori_engine.py) runs in.
 # Usage: ./irodori.sh [--backend auto|cu128|cpu|xpu]   Env: IRODORI_BACKEND (auto)
 set -euo pipefail
 
@@ -69,7 +69,7 @@ main() {
   echo "[2/3] Python 3.11 の環境を用意しています ($backend)..."
   (cd "$app" && uv sync --frozen --no-dev --extra "$backend" --python 3.11)
   echo "[3/3] 音声ライブラリと GPU を確認しています..."
-  "$root/.venv/bin/python" "$root/irodori_worker.py" --check "$backend"
+  "$root/.venv/bin/python" "$root/irodori_engine.py" --check "$backend"
   echo "$backend" >"$root/config/backend.txt"
   echo "準備が完了しました ($backend)。"
 }
