@@ -9,16 +9,21 @@ JSON の API は `/api` 以下にあります。エラーは `4xx`/`5xx` と `{"
 
 ```json
 {
-  "models": [{"id": "Aratako/Irodori-TTS-v4.1-Small", "label": "ベース（標準モデル）"}, ...],
+  "models": [{"id": "Aratako/Irodori-TTS-v4.1-Small-MF", "label": "MF（高速）", "steps": 4,
+              "meanflow": true, "quantized": false, "min_cuda_capability": null}, ...],
   "modes": [{"id": "design", "label": "言葉で声を作る（ボイスデザイン）"}, ...],
-  "devices": ["cpu"],
-  "precisions": {"cpu": ["fp32"]},
+  "devices": ["cuda", "cpu"],
+  "precisions": {"cuda": ["bf16", "fp32"], "cpu": ["fp32"]},
+  "cuda_capability": [8, 6],
   "max_candidates": 32,
   "emoji_groups": [{"title": "ポジティブ", "items": [{"emoji": "😊", "label": "楽しげ", "description": "..."}]}]
 }
 ```
 
-`devices`・`precisions`・`emoji_groups` は推論エンジンから取得します。推論エンジンに届かない場合は `503` です。
+- `models` は標準・Anime・MF・Large (通常・INT8・INT4) で、モデルの性質はサーバーの 1 つの表が持ちます。
+  `steps` は計算回数を空欄にしたときの回数、`meanflow` は CFG と Sway を使わないモデル、
+  `quantized` は CUDA と bf16 が要るモデル、`min_cuda_capability` は必要な GPU の世代です。
+- `devices`・`precisions`・`cuda_capability`・`emoji_groups` は推論エンジンから取得します。推論エンジンに届かない場合は `503` です。
 
 ## 生成
 
@@ -30,10 +35,11 @@ JSON の API は `/api` 以下にあります。エラーは `4xx`/`5xx` と `{"
   "mode": "design",
   "caption": "落ち着いた女性の声で、やわらかく丁寧に話す。",
   "reference_ids": [3, 1],
+  "voice_id": null,
   "text": "こんにちは。",
   "dictionary_enabled": true,
-  "speed": 1.0,
-  "num_steps": 40, "num_candidates": 1, "duration_scale": 1.0,
+  "speed": 1.0, "silence": 0.0,
+  "num_steps": null, "num_candidates": 1, "duration_scale": 1.0,
   "seed": "", "seconds": "",
   "cfg_scale_text": 3.0, "cfg_scale_caption": 4.0, "cfg_scale_speaker": 5.0,
   "model_device": "cpu", "model_precision": "fp32", "codec_device": "cpu", "codec_precision": "fp32",
@@ -45,10 +51,16 @@ JSON の API は `/api` 以下にあります。エラーは `4xx`/`5xx` と `{"
 }
 ```
 
-- 省略した項目は既定値になります。`model_device`・`codec_device` は `/api/info` の `devices` の先頭、
-  精度はその機器の `precisions` の先頭です。bf16 を扱える機器 (cuda・xpu) では bf16 が先頭です。
+- 省略した項目は既定値になります。`model_device`・`codec_device` を省略または空欄にすると `/api/info` の `devices` の先頭、
+  精度を省略または空欄にするとその機器の `precisions` の先頭です。bf16 を扱える機器 (cuda・xpu) では bf16 が先頭です。
+- `num_steps` を省略または `null` にすると、モデルの `steps` (標準 40・MF 4) を使います。
+- 量子化版の Large (INT8・INT4) は cuda で bf16 に固定します。cuda や bf16 が無い、INT4 で GPU の世代が足りない場合は `400` です。
 - `mode`: `design` (caption を使う)・`clone` (`reference_ids` を使う)・`both`・`auto` (文章だけ)。
   使わない側の caption・参照音声は無視します。`clone`・`both` は参照音声が 1 件以上必要です。
+- `voice_id` を指定すると、その話者のモデル・話し方 (caption)・参照音声で生成し、
+  `model`・`mode`・`caption`・`reference_ids` は無視します。話し方が空なら `clone`、あれば `both` になります。
+  削除した話者や無い話者は `400` です。
+- `silence` は末尾に足す無音の秒数 (0〜10) です。
 - 範囲: `speed` 0.75〜1.5、`num_steps` 1〜120、`num_candidates` 1〜`max_candidates`、
   `duration_scale` 0.5〜1.5、各 `cfg_scale_*` 0〜10、`sway_coeff` -1〜1.5。
   `*_raw`・`seed`・`seconds` は空欄可の文字列で、推論側が解釈します。
@@ -66,9 +78,11 @@ JSON の API は `/api` 以下にあります。エラーは `4xx`/`5xx` と `{"
 
 ```sh
 curl -X POST http://<host>:<port>/api/speech -H 'content-type: application/json' \
-  -d '{"text": "こんにちは。", "caption": "落ち着いた女性の声で、やわらかく話す。", "seed": "123"}' \
+  -d '{"voice_id": 3, "text": "こんにちは。", "seed": "123"}' \
   -o hello.wav
 ```
+
+登録した話者は `GET /api/voices` で一覧できます。話者を指定すると、どの文章も同じ声 (モデル・話し方・参照音声) で生成します。
 
 応答 `200` は `audio/wav` の本体で、次のヘッダーが付きます。エラーは他の API と同じ JSON です。
 
@@ -86,11 +100,13 @@ curl -X POST http://<host>:<port>/api/speech -H 'content-type: application/json'
   "id": 12, "batch": "20260926-123456-ab12cd", "candidate": 1, "created_at": "2026-09-26T12:34:56Z",
   "text": "Irodoriです。", "text_applied": "いろどりです。",
   "mode": "design", "caption": "...", "reference_ids": [], "model": "Aratako/Irodori-TTS-v4.1-Small",
-  "seed": "1989088249105138954", "speed": 1.0, "params": {<生成要求そのもの>},
+  "seed": "1989088249105138954", "speed": 1.0, "params": {<検証後の生成要求>},
   "audio_url": "/api/generations/12/audio",
   "saved": false,
   "character": "ずんだ",
-  "favorite": false
+  "voice_id": 3,
+  "favorite": false,
+  "scripted": false
 }
 ```
 
@@ -102,56 +118,87 @@ curl -X POST http://<host>:<port>/api/speech -H 'content-type: application/json'
 
 - `GET /api/generations/{id}` → `Generation`
 - `GET /api/generations/{id}/audio` → `audio/wav`。`?download=1` で添付ファイルとして返します。
-- `saved` はお手本に保存した生成で `true` になります。
-- `character` は、使ったお手本がすべて同じキャラクターのときに入ります。それ以外は `null` です。
+- `saved` は話者の登録に使った生成 (話者が削除されていないもの) で `true` になります。
+- `character` と `voice_id` は、登録した話者で生成したときの話者名と ID です。それ以外は `null` です。
+- `scripted` は台本のカードの最新の音声として使われている生成で `true` になります。
 - `favorite` は ★ の有無です。`PUT /api/generations/{id}/favorite` `{"favorite": true}` で切り替え、更新後の `Generation` を返します。
-- `POST /api/generations/cleanup` は、★ もお手本への保存もない生成の記録と WAV を消し、`{"deleted": 5}` を返します。
+- `POST /api/generations/cleanup` は、★・話者の登録・台本での使用のどれにも当たらない生成の記録と WAV を消し、`{"deleted": 5}` を返します。
 - `DELETE /api/generations/{id}` → `204`。記録を消してから WAV を消します。
   WAV を消せなかった場合は `file_errors` に残ります。
 
-## お手本
+## 話者 (声)
 
-生成履歴の音声に、キャラクター名を付けてお手本 (ボイスクローンの参照音声) として保存できます。
-保存すると WAV を複製するため、元の生成を消してもお手本は残ります。
+話者は名前・モデル・話し方 (caption)・参照音声 1 本の組です。登録後に変えられるのは名前だけで、
+音声・モデル・話し方を変えるときは別の話者として登録します。
 
-- `POST /api/generations/{id}/reference` `{"character": "ずんだ"}` で保存し、`Reference` を返します。
-  キャラクター名は 1 行・50 文字までです。
-- `GET /api/references` → 保存したお手本の一覧 (キャラクター名順)。アップロードしただけの参照音声は含みません。
-
-  ```json
-  {"references": [{"id": 5, "created_at": "...", "name": "生成 12", "character": "ずんだ",
-    "source_generation_id": 12, "audio_url": "/api/references/5/audio"}]}
-  ```
-
-- `DELETE /api/references/{id}` → `204`。記録を消してからファイルを消します。
-- お手本の `id` は生成要求の `reference_ids` にそのまま使えます。
-
-## まとめて生成
-
-キャラクターのお手本を使い、台詞を 1 行 1 本で順に生成します。できた音声は通常の生成と同じく履歴に記録されます。
+`Voice`:
 
 ```json
-POST /api/batches
-{"character": "ずんだ", "lines": "おはよう。\nこんにちは。", "settings": {"num_steps": 40, "caption": "..."}}
+{"id": 3, "created_at": "2026-10-15T03:00:00Z", "name": "ずんだ",
+ "model": "Aratako/Irodori-TTS-v4.1-Small-MF", "caption": "明るく、親しみやすい口調で話す。",
+ "source_generation_id": 12, "revision": 1, "audio_url": "/api/voices/3/audio"}
 ```
 
-- `settings` は生成要求と同じ項目です (省略可)。文章・候補数 (1)・参照音声は行ごとに決まります。
-  声の作り方がお手本を使わない指定のときはボイスクローンにします。参照音声はそのキャラクターのお手本 (古い順に 16 件まで) です。
-- 台詞は空行を除いて 100 行までです。応答は `202` と `{"id": "...", "total": 2}` です。
-- 生成はサーバーの中で進むため、ブラウザを閉じても止まりません。失敗した行は飛ばして次へ進みます。
-- `GET /api/batches/{id}` で進み具合を返します。`GET /api/batches` は最近の 20 件です。
-  進み具合はサーバーの再起動で消えますが、生成した音声は履歴に残ります。
+- `GET /api/voices` → `{"voices": [<Voice>, ...]}` (登録順。削除した話者は含みません)
+- `POST /api/voices` `{"name", "model", "caption", "generation_id" または "reference_id"}` → `Voice`
+  - 参照音声は、生成履歴の生成 (`generation_id`) かアップロードした音声 (`reference_id`) のどちらか 1 つです。
+    サーバーが WAV に変換して複製するため、元の生成や音声を消しても話者は残ります。
+  - 名前は 1 行・1〜80 文字、`model` は `/api/info` の `models` のどれか、話し方は 2000 文字まで、
+    参照音声は 1〜120 秒です。外れると `400` です。
+- `PATCH /api/voices/{id}` `{"name", "revision"}` → 名前を変えた `Voice` (`revision` が 1 増えます)。
+  `revision` が古いと `409`、無い話者は `404` です。
+- `DELETE /api/voices/{id}` → `204`。一覧から外しますが参照音声は消さないため、生成済みの音声と処理待ちの生成はそのまま使えます。
+- `GET /api/voices/{id}/audio` → 参照音声の WAV
 
-  ```json
-  {"id": "...", "character": "ずんだ", "total": 3, "done": 3, "generation_ids": [40, 41],
-   "failed": [{"line": "...", "error": "..."}], "finished": true}
-  ```
+画面の「新しい声を作る」「お手本＋話し方で作る」は、共通のサンプル文章を `POST /api/generate` で候補として生成し、
+選んだ候補を `generation_id` で登録します。「手元の音声をそのまま使う」は `POST /api/references` の音声を `reference_id` で登録します。
 
 ## 参照音声
 
-- `POST /api/references` (multipart、項目名 `file`) で保存し、`{"id": 3, "name": "voice.m4a"}` を返します。
-  wav・mp3・flac・ogg・opus・m4a・aac・webm、50MB まで。
+- `POST /api/references` (multipart、項目名 `file`) で保存し、`{"id": 3, "name": "voice.m4a", "audio_url": "/api/references/3/audio"}` を返します。
+  wav・mp3・flac・ogg・opus・m4a・aac・webm、50MB まで。`id` は生成要求の `reference_ids` と話者の登録に使えます。
 - `GET /api/references/{id}/audio` → 保存した音声
+
+## 台本
+
+音声作成の画面の台本は、サーバーに 1 つだけ保存します。別の端末・ブラウザで開いても同じ台本を続きから編集できます。
+
+`ScriptState`:
+
+```json
+{
+  "revision": 7,
+  "script": {
+    "cards": [{"id": "9f2c…", "text": "おはよう。", "voice_id": 3, "speed": 1.0, "silence": 0.5}],
+    "settings": {<生成要求のうち全カードで共有する項目>},
+    "dictionary_enabled": true,
+    "options": {"inherit": true, "pattern": "$連番$_$話者名$_$日付$", "txt": false}
+  },
+  "cards": [{"id": "9f2c…", "status": "done", "error": "", "generation_id": 40,
+             "audio_url": "/api/generations/40/audio", "download_name": "001_ずんだ_20261015.wav"}],
+  "job": {"pending": [], "running": false, "total": 3, "done": 3, "failed": 0, "stopping": false, "finished": true}
+}
+```
+
+- `GET /api/script` → `ScriptState`
+- `PUT /api/script` `{"revision", "script"}` → `ScriptState`。`revision` が保存済みのものと違えば `409` で、保存しません。
+  カードは 1〜1000 枚、ID は重複しない 64 文字まで、文章は 10000 文字まで、`speed` 0.75〜1.5、`silence` 0〜10 です。
+  `settings` のうち文章・話者・話速・無音・候補数など、カードごとに決まる項目は保存時に消します。
+  `pattern` は 1〜200 文字で、`$連番$`・`$話者名$`・`$テキスト$` (先頭 40 文字)・`$日付$` を置き換えます。
+- `cards[].status`: `empty` (文章なし)・`no_voice` (話者が無い)・`new` (未作成)・`queued`・`running`・`done`・`changed` (変更あり)・`failed`。
+  変更の判定は、読み辞書を反映した文章・話者・話速・無音・共有の生成設定を、音声を作ったときと比べます。
+  読み辞書を変えても反映後の文章が同じなら `done` のままです。
+- `POST /api/script/generate` `{"revision", "target"}` で生成を始め、`ScriptState` を返します。
+  `target` は `all` (文章のあるカード)・`changed` (`new`・`changed`・`failed`)・カードの ID です。
+  話者の無いカードが対象にあると `400`、`revision` が古いか別の生成が進行中なら `409` です。
+- 生成はサーバーの中で 1 件ずつ進み、ブラウザを閉じても止まりません。カードの音声は生成履歴にも記録します。
+  生成中に文章を変えても、できる音声は開始時の文章のものです。生成に失敗したカードは前の音声を残し、`error` に理由を示します。
+- `POST /api/script/stop` → 作成中の 1 件が終わったら止めます。
+- `GET /api/script/playlist[?from=<カード ID>]` → `{"items": [{"id", "audio_url"}]}`。文章のあるカードを先頭 (または `from`) から順に返します。
+  対応する音声の無いカードがあると `409` で番号を示します。
+- `GET /api/script/export?kind=wav` は全カードを台本順につなげた 1 本の WAV、`kind=zip` はカードごとの WAV
+  (`options.txt` が真なら文章の TXT も) の ZIP を返します。ZIP の中の名前は `pattern` で付け、同じ名前には `_001` から番号を足します。
+  音声の無いカードがあると `409` です。
 
 ## 読み辞書
 
@@ -172,7 +219,7 @@ POST /api/batches
 
 | path | 要求 | 成功時の応答 (`200`) |
 | --- | --- | --- |
-| `/info` | `{}` | `{"devices", "precisions", "max_candidates", "emojis": [{"emoji", "label", "description"}]}` |
+| `/info` | `{}` | `{"devices", "precisions", "cuda_capability", "max_candidates", "emojis": [{"emoji", "label", "description"}]}` |
 | `/generate` | `{"params": {...}, "references": [{"format": "wav", "data": "<base64>"}]}` | `{"wavs": ["<base64>", ...], "seed": "42", "log": "<実行記録>"}` |
 | `/unload` | `{}` | `{}` |
 

@@ -13,8 +13,10 @@ describe("matchRoute", () => {
     expect(matchRoute("/dictionary").index).toBe(1);
     expect(matchRoute("/history").index).toBe(2);
     expect(matchRoute("/credits").index).toBe(3);
+    expect(matchRoute("/voices").index).toBe(4);
+    // Former pages: お手本 became the voices, まとめて生成 the script.
     expect(matchRoute("/references").index).toBe(4);
-    expect(matchRoute("/batch").index).toBe(5);
+    expect(matchRoute("/batch").index).toBe(0);
   });
 
   it("normalizes unknown paths to home", () => {

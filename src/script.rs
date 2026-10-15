@@ -4,7 +4,10 @@
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::generation::{GenerateRequest, MAX_TEXT_CHARS};
+use crate::{
+    db::CardResult,
+    generation::{GenerateRequest, MAX_TEXT_CHARS},
+};
 
 pub const MAX_CARDS: usize = 1000;
 pub const DEFAULT_PATTERN: &str = "$連番$_$話者名$_$日付$";
@@ -137,16 +140,6 @@ pub fn signature(card: &Card, text_applied: &str, settings: &GenerateRequest) ->
     .to_string()
 }
 
-/// The latest generation recorded for a card.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct Outcome {
-    /// The generation still exists.
-    pub audio: bool,
-    pub signature: String,
-    /// The last attempt's failure; the earlier audio is kept.
-    pub error: String,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Status {
@@ -175,7 +168,7 @@ pub fn status(
     card: &Card,
     voice_exists: bool,
     job: Option<Job>,
-    outcome: Option<&Outcome>,
+    outcome: Option<&CardResult>,
     current: &str,
 ) -> Status {
     match job {
@@ -417,12 +410,13 @@ mod tests {
     #[test]
     fn statuses_combine_the_job_the_outcome_and_the_input() {
         let c = card("a", "text");
-        let done = Outcome {
+        let done = CardResult {
+            generation_id: Some(1),
             audio: true,
             signature: "s".into(),
             error: String::new(),
         };
-        let st = |card: &Card, voice: bool, job, outcome: Option<&Outcome>| {
+        let st = |card: &Card, voice: bool, job, outcome: Option<&CardResult>| {
             status(card, voice, job, outcome, "s")
         };
         assert_eq!(st(&c, true, None, None), Status::New);
@@ -438,13 +432,12 @@ mod tests {
             Status::Empty
         );
         assert_eq!(st(&c, false, None, Some(&done)), Status::NoVoice);
-        let failed_first = Outcome {
-            audio: false,
-            signature: String::new(),
+        let failed_first = CardResult {
             error: "失敗".into(),
+            ..CardResult::default()
         };
         assert_eq!(st(&c, true, None, Some(&failed_first)), Status::Failed);
-        let failed_retry = Outcome {
+        let failed_retry = CardResult {
             error: "失敗".into(),
             ..done.clone()
         };
@@ -453,7 +446,7 @@ mod tests {
             Status::Changed,
             "a failed retry keeps the earlier audio"
         );
-        let deleted = Outcome {
+        let deleted = CardResult {
             audio: false,
             ..done
         };

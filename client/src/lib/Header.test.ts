@@ -35,10 +35,9 @@ describe("Header menu and theme flow", () => {
     );
     expect(items).toEqual([
       "テーマ設定",
-      "まとめて生成",
+      "声の登録",
       "読み辞書",
       "生成履歴",
-      "お手本",
       "クレジット・利用条件",
     ]);
 

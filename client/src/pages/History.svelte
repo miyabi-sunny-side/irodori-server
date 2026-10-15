@@ -11,15 +11,16 @@
   import ConfirmModal from "../lib/ConfirmModal.svelte";
   import Icon from "../lib/Icon.svelte";
   import Modal from "../lib/Modal.svelte";
+  import { info, loadInfo, modelLabel, playback } from "../lib/state.svelte";
   import {
-    CHARACTER_MAX,
-    characterName,
     deletableCount,
     filterByCharacter,
     generationLabel,
     historyCharacters,
-  } from "../lib/references";
-  import { info, loadInfo, playback } from "../lib/state.svelte";
+    inheritedCaption,
+    VOICE_NAME_MAX,
+    voiceName,
+  } from "../lib/voices";
 
   type ListState = "loading" | "empty" | "error" | "success";
 
@@ -29,7 +30,6 @@
   let pending = $state<Generation | null>(null);
   let deleteError = $state("");
   let returnFocus: HTMLElement | null = null;
-  let characters = $state<string[]>([]);
   let saving = $state<Generation | null>(null);
   let character = $state("");
   let saveError = $state("");
@@ -116,22 +116,11 @@
     returnFocus?.focus();
   }
 
-  async function loadCharacters() {
-    try {
-      const names = (await api.references()).references.map(
-        (reference) => reference.character ?? "",
-      );
-      characters = [...new Set(names.filter(Boolean))];
-    } catch {
-      characters = [];
-    }
-  }
-
   function askSave(generation: Generation, event: MouseEvent) {
     returnFocus = event.currentTarget as HTMLElement;
     saveError = "";
+    character = generation.character ?? "";
     saving = generation;
-    void loadCharacters();
   }
 
   function cancelSave() {
@@ -142,7 +131,7 @@
   async function confirmSave(event: SubmitEvent) {
     event.preventDefault();
     const generation = saving;
-    const checked = characterName(character);
+    const checked = voiceName(character);
     if (!generation) {
       return;
     }
@@ -152,10 +141,15 @@
     }
     saveBusy = true;
     try {
-      await api.saveReference(generation.id, checked.value);
+      await api.addVoice({
+        name: checked.value,
+        model: generation.model,
+        caption: inheritedCaption(generation),
+        generation_id: generation.id,
+      });
       generation.saved = true;
       saving = null;
-      message = `「${checked.value}」のお手本に保存しました。`;
+      message = `「${checked.value}」を話者に登録しました。`;
       await tick();
       document.getElementById(`saved-${generation.id}`)?.focus();
     } catch (error) {
@@ -214,7 +208,7 @@
     <div class="toolbar">
       {#if names.length > 0 || filter}
         <div class="field filter">
-          <label for="history-filter">キャラクター</label>
+          <label for="history-filter">話者</label>
           <select
             id="history-filter"
             class="input"
@@ -236,13 +230,8 @@
           onclick={askCleanup}
           ><Icon
             name="trash"
-          />★もお手本もない音声を一括削除（{deletable}件）</button
+          />使っていない音声を一括削除（{deletable}件）</button
         >
-        <p class="help">
-          ★を付けた音声とお手本に保存した音声は残ります。絞り込みに関係なく履歴全体が対象です。<a
-            href="/references">お手本の一覧</a
-          >
-        </p>
       </div>
     </div>
   {/if}
@@ -297,23 +286,26 @@
             <time datetime={generation.created_at}
               >{formatDate(generation.created_at)}</time
             >
-            ・{label(info.value?.modes, generation.mode)}
-            ・{label(info.value?.models, generation.model)}
+            {#if !generation.voice_id}・{label(
+                info.value?.modes,
+                generation.mode,
+              )}{/if}
+            ・{modelLabel(generation.model)}
             ・話速 {generation.speed.toFixed(2)}倍
             {#if generation.candidate > 1}・候補 {generation.candidate}{/if}
           </p>
           <div class="save-row">
             {#if generation.saved}
               <span class="saved" id={`saved-${generation.id}`} tabindex="-1"
-                ><Icon name="check-check" />お手本に保存済み</span
+                ><Icon name="check-check" />話者に登録済み</span
               >
             {:else}
               <button
                 class="btn btn-sm"
                 type="button"
-                aria-label={`「${generation.text}」をお手本に保存`}
+                aria-label={`「${generation.text}」を話者に登録`}
                 onclick={(event) => askSave(generation, event)}
-                ><Icon name="book" />お手本に保存</button
+                ><Icon name="book" />話者に登録</button
               >
             {/if}
           </div>
@@ -347,30 +339,25 @@
 </div>
 
 {#if saving}
-  <Modal title="お手本に保存" onclose={cancelSave}>
+  <Modal title="話者に登録" onclose={cancelSave}>
     <form class="save-form" onsubmit={(event) => void confirmSave(event)}>
       <p class="save-text">「{saving.text}」</p>
+      <p class="help">
+        {modelLabel(
+          saving.model,
+        )}{#if inheritedCaption(saving)}・{inheritedCaption(saving)}{/if}
+      </p>
       <div class="field">
-        <label for="character">キャラクター名</label>
+        <label for="character">話者名</label>
         <input
           id="character"
           class="input"
-          list="character-names"
-          maxlength={CHARACTER_MAX}
+          maxlength={VOICE_NAME_MAX}
           autocomplete="off"
           data-autofocus
-          aria-describedby="character-help"
           aria-invalid={saveError ? "true" : undefined}
           bind:value={character}
         />
-        <datalist id="character-names">
-          {#each characters as name (name)}
-            <option value={name}></option>
-          {/each}
-        </datalist>
-        <p class="help" id="character-help">
-          1行・{CHARACTER_MAX}文字まで。同じ名前のお手本はまとめて表示します。
-        </p>
         {#if saveError}
           <p class="help error" role="alert">{saveError}</p>
         {/if}
@@ -380,7 +367,7 @@
           >キャンセル</button
         >
         <button class="btn btn-primary" type="submit" disabled={saveBusy}
-          >保存する</button
+          >登録する</button
         >
       </div>
     </form>
@@ -389,12 +376,12 @@
 
 {#if cleanupOpen}
   <ConfirmModal
-    title="★もお手本もない音声の一括削除"
+    title="使っていない音声の一括削除"
     confirmLabel="削除する"
     onconfirm={() => void confirmCleanup()}
     oncancel={cancelCleanup}
   >
-    ★もお手本への保存もない{deletable}件の音声を削除しますか？記録とWAVファイルを削除し、元に戻せません。★を付けた音声とお手本に保存した音声は残ります。
+    {deletable}件の音声を削除しますか？記録とWAVファイルを削除し、元に戻せません。★を付けた音声、話者に登録した音声、台本で使っている音声は残ります。
   </ConfirmModal>
 {/if}
 

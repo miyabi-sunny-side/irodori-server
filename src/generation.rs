@@ -157,6 +157,7 @@ pub struct GenerateRequest {
     pub cfg_scale_text: f64,
     pub cfg_scale_caption: f64,
     pub cfg_scale_speaker: f64,
+    /// Blank devices and precisions take the engine's first choices (bf16 where offered).
     pub model_device: String,
     pub model_precision: String,
     pub codec_device: String,
@@ -197,10 +198,10 @@ impl Default for GenerateRequest {
             cfg_scale_text: 3.0,
             cfg_scale_caption: 4.0,
             cfg_scale_speaker: 5.0,
-            model_device: "cpu".into(),
-            model_precision: "fp32".into(),
-            codec_device: "cpu".into(),
-            codec_precision: "fp32".into(),
+            model_device: String::new(),
+            model_precision: String::new(),
+            codec_device: String::new(),
+            codec_precision: String::new(),
             t_schedule_mode: "linear".into(),
             sway_coeff: -1.0,
             cfg_guidance_mode: "independent".into(),
@@ -252,9 +253,32 @@ impl GenerateRequest {
         self.reference_ids.clear();
     }
 
+    /// Fills blank devices and precisions with the engine's first choices.
+    fn fill_runtime_defaults(&mut self, runtime: &Runtime) {
+        for (device, precision) in [
+            (&mut self.model_device, &mut self.model_precision),
+            (&mut self.codec_device, &mut self.codec_precision),
+        ] {
+            if device.is_empty()
+                && let Some(first) = runtime.devices.first()
+            {
+                first.clone_into(device);
+            }
+            if precision.is_empty()
+                && let Some(first) = runtime
+                    .precisions
+                    .get(device.as_str())
+                    .and_then(|p| p.first())
+            {
+                first.clone_into(precision);
+            }
+        }
+    }
+
     /// Checks the request before any work starts and settles the model precision;
     /// the message is shown to the user. `references` counts the audio the engine will get.
     pub fn validate(&mut self, runtime: &Runtime, references: usize) -> Result<(), String> {
+        self.fill_runtime_defaults(runtime);
         let Some(model) = find_model(&self.model) else {
             return Err("モデルと声の作り方を一覧から選んでください。".into());
         };
@@ -441,30 +465,6 @@ pub fn prefer_bf16(runtime: &mut Runtime) {
     }
 }
 
-/// Fills omitted device and precision fields from the runtime's first choices.
-pub fn with_runtime_defaults(mut body: Value, runtime: &Runtime) -> Value {
-    let Some(fields) = body.as_object_mut() else {
-        return body;
-    };
-    for (device_key, precision_key) in [
-        ("model_device", "model_precision"),
-        ("codec_device", "codec_precision"),
-    ] {
-        if !fields.contains_key(device_key)
-            && let Some(device) = runtime.devices.first()
-        {
-            fields.insert(device_key.into(), device.as_str().into());
-        }
-        let device = fields[device_key].as_str().unwrap_or_default().to_owned();
-        if !fields.contains_key(precision_key)
-            && let Some(precision) = runtime.precisions.get(&device).and_then(|p| p.first())
-        {
-            fields.insert(precision_key.into(), precision.as_str().into());
-        }
-    }
-    body
-}
-
 /// Maps an engine exception to the Gradio version's user message.
 pub fn error_message(error_type: &str, error: &str) -> &'static str {
     let error = error.to_lowercase();
@@ -559,7 +559,10 @@ mod tests {
         rejects(|r| r.model = "someone/else".into());
         rejects(|r| r.mode = "sing".into());
         rejects(|r| r.model_device = "mps".into());
-        rejects(|r| r.codec_precision = "bf16".into());
+        rejects(|r| {
+            r.codec_device = "cpu".into();
+            r.codec_precision = "bf16".into();
+        });
         rejects(|r| r.t_schedule_mode = "cosine".into());
         rejects(|r| r.cfg_guidance_mode = "mixed".into());
     }
@@ -744,29 +747,32 @@ mod tests {
     }
 
     #[test]
-    fn omitted_device_fields_take_the_runtime_defaults() {
+    fn blank_devices_and_precisions_take_the_runtime_defaults() {
         let mut rt = runtime();
         prefer_bf16(&mut rt);
-        let filled = with_runtime_defaults(json!({"text": "a"}), &rt);
-        assert_eq!(filled["model_device"], "cuda");
-        assert_eq!(filled["codec_device"], "cuda");
-        assert_eq!(filled["model_precision"], "bf16");
-        assert_eq!(filled["codec_precision"], "bf16");
-        let explicit = with_runtime_defaults(
-            json!({"text": "a", "model_device": "cpu", "codec_precision": "fp32"}),
-            &rt,
-        );
-        assert_eq!(explicit["model_device"], "cpu");
+        let mut blank = request();
+        assert_eq!(blank.validate(&rt, 0), Ok(()));
         assert_eq!(
-            explicit["model_precision"], "fp32",
+            (
+                blank.model_device.as_str(),
+                blank.model_precision.as_str(),
+                blank.codec_device.as_str(),
+                blank.codec_precision.as_str()
+            ),
+            ("cuda", "bf16", "cuda", "bf16")
+        );
+        let mut explicit = GenerateRequest {
+            model_device: "cpu".into(),
+            codec_precision: "fp32".into(),
+            ..request()
+        };
+        assert_eq!(explicit.validate(&rt, 0), Ok(()));
+        assert_eq!(
+            explicit.model_precision, "fp32",
             "precision follows the chosen device"
         );
-        assert_eq!(explicit["codec_device"], "cuda");
-        assert_eq!(explicit["codec_precision"], "fp32");
-        assert_eq!(
-            with_runtime_defaults(json!("not an object"), &rt),
-            json!("not an object")
-        );
+        assert_eq!(explicit.codec_device, "cuda");
+        assert_eq!(explicit.codec_precision, "fp32");
     }
 
     #[test]

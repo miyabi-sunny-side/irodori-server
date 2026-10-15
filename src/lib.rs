@@ -294,10 +294,8 @@ async fn info(State(state): State<AppState>) -> ApiResult<Json<Value>> {
     })))
 }
 
-/// Parses a generation request, taking omitted device and precision fields from the engine.
-async fn parse_request(state: &AppState, body: Value) -> ApiResult<GenerateRequest> {
-    let (runtime, _) = state.runtime().await?;
-    serde_json::from_value(generation::with_runtime_defaults(body, &runtime))
+fn parse_request(body: Value) -> ApiResult<GenerateRequest> {
+    serde_json::from_value(body)
         .map_err(|error| AppError::bad(format!("生成の指定を読めません: {error}")))
 }
 
@@ -305,7 +303,7 @@ async fn generate(
     State(state): State<AppState>,
     Json(body): Json<Value>,
 ) -> ApiResult<Json<Value>> {
-    let request = parse_request(&state, body).await?;
+    let request = parse_request(body)?;
     // Run detached so a closed browser tab does not abandon a half-recorded generation.
     tokio::spawn(run_generation(state, request))
         .await
@@ -315,7 +313,7 @@ async fn generate(
 
 /// One WAV for scripts such as video production: a single candidate, recorded like any other.
 async fn speech(State(state): State<AppState>, Json(body): Json<Value>) -> ApiResult<Response> {
-    let mut request = parse_request(&state, body).await?;
+    let mut request = parse_request(body)?;
     request.num_candidates = 1;
     let (generations, _) = tokio::spawn(run_generation(state.clone(), request))
         .await
@@ -489,6 +487,7 @@ async fn synthesize(
             character: character.clone(),
             favorite: false,
             voice_id: request.voice_id,
+            scripted: false,
         });
     }
     let saved = state.db().insert_generations(&rows);
@@ -886,17 +885,12 @@ fn load_script(state: &AppState) -> ApiResult<ScriptState> {
         };
         let current = script::signature(card, &applied, &request);
         let result = results.get(&card.id);
-        let outcome = result.map(|r| script::Outcome {
-            audio: r.audio,
-            signature: r.signature.clone(),
-            error: r.error.clone(),
-        });
         let voice = card.voice_id.and_then(|id| voices.get(&id));
         let status = script::status(
             card,
             voice.is_some(),
             job.as_ref().and_then(|j| j.of(&card.id)),
-            outcome.as_ref(),
+            result,
             &current,
         );
         let generation = match result {

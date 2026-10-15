@@ -24,6 +24,15 @@
     "star-filled",
     "download",
     "upload",
+    "play",
+    "square",
+    "copy",
+    "scissors",
+    "undo",
+    "redo",
+    "grip",
+    "plus",
+    "smile",
   ] as const;
 </script>
 
@@ -122,6 +131,40 @@
       points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"
       fill={name === "star-filled" ? "currentColor" : "none"}
     />
+  {:else if name === "play"}
+    <polygon points="6 3 20 12 6 21 6 3" />
+  {:else if name === "square"}
+    <rect x="5" y="5" width="14" height="14" rx="2" />
+  {:else if name === "copy"}
+    <rect x="8" y="8" width="14" height="14" rx="2" />
+    <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2" />
+  {:else if name === "scissors"}
+    <circle cx="6" cy="6" r="3" />
+    <path d="M8.12 8.12 12 12" />
+    <path d="M20 4 8.12 15.88" />
+    <circle cx="6" cy="18" r="3" />
+    <path d="M14.8 14.8 20 20" />
+  {:else if name === "undo"}
+    <path d="M9 14 4 9l5-5" />
+    <path d="M4 9h10.5a5.5 5.5 0 0 1 5.5 5.5 5.5 5.5 0 0 1-5.5 5.5H11" />
+  {:else if name === "redo"}
+    <path d="m15 14 5-5-5-5" />
+    <path d="M20 9H9.5A5.5 5.5 0 0 0 4 14.5 5.5 5.5 0 0 0 9.5 20H13" />
+  {:else if name === "grip"}
+    <circle cx="9" cy="5" r="1" />
+    <circle cx="9" cy="12" r="1" />
+    <circle cx="9" cy="19" r="1" />
+    <circle cx="15" cy="5" r="1" />
+    <circle cx="15" cy="12" r="1" />
+    <circle cx="15" cy="19" r="1" />
+  {:else if name === "plus"}
+    <path d="M5 12h14" />
+    <path d="M12 5v14" />
+  {:else if name === "smile"}
+    <circle cx="12" cy="12" r="10" />
+    <path d="M8 14s1.5 2 4 2 4-2 4-2" />
+    <line x1="9" y1="9" x2="9.01" y2="9" />
+    <line x1="15" y1="9" x2="15.01" y2="9" />
   {/if}
 </svg>
 

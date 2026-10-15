@@ -31,10 +31,33 @@ describe("App", () => {
     vi.stubGlobal(
       "fetch",
       vi.fn<typeof fetch>().mockImplementation((input) => {
-        const payload =
-          String(input) === "/api/info"
-            ? INFO
-            : { generations: [], file_errors: [] };
+        const payload = {
+          "/api/info": INFO,
+          "/api/voices": { voices: [] },
+          "/api/dictionary": { entries: [] },
+          "/api/script": {
+            revision: 1,
+            script: {
+              cards: [
+                { id: "a", text: "", voice_id: null, speed: 1, silence: 0 },
+              ],
+              settings: {},
+              dictionary_enabled: true,
+              options: { inherit: true, pattern: "$連番$", txt: false },
+            },
+            cards: [
+              {
+                id: "a",
+                status: "empty",
+                error: "",
+                generation_id: null,
+                audio_url: null,
+                download_name: null,
+              },
+            ],
+            job: null,
+          },
+        }[String(input)] ?? { generations: [], file_errors: [] };
         return Promise.resolve(
           new Response(JSON.stringify(payload), { status: 200 }),
         );
@@ -61,6 +84,8 @@ describe("App", () => {
     expect(screen.getByRole("heading", { level: 1 }).textContent).toBe(
       "音声作成",
     );
-    expect(screen.getByText("① モデル・声を選ぶ")).toBeTruthy();
+    await waitFor(() =>
+      expect(screen.getByLabelText("セリフ 1の文章")).toBeTruthy(),
+    );
   });
 });

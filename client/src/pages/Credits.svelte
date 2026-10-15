@@ -21,6 +21,27 @@
         rel="noreferrer">phasefield-audio</a
       ></strong
     >
+    <br />
+    MFモデル：<strong
+      ><a
+        href="https://huggingface.co/Aratako/Irodori-TTS-v4.1-Small-MF"
+        target="_blank"
+        rel="noreferrer">Aratako / Irodori-TTS-v4.1-Small-MF</a
+      ></strong
+    ><br />
+    Largeモデル：<strong
+      ><a
+        href="https://huggingface.co/Aratako/Irodori-TTS-v4-Large"
+        target="_blank"
+        rel="noreferrer">Irodori-TTS-v4-Large</a
+      ></strong
+    >・<strong
+      ><a
+        href="https://huggingface.co/Aratako/Irodori-TTS-v4-Large-Quantized"
+        target="_blank"
+        rel="noreferrer">Irodori-TTS-v4-Large-Quantized</a
+      ></strong
+    >
   </p>
 
   <h2>ライセンス</h2>
@@ -30,6 +51,18 @@
       target="_blank"
       rel="noreferrer">https://licenses.opensource.jp/MIT/MIT.html</a
     >）
+  </p>
+
+  <p>
+    Largeモデル（通常版・すべての量子化版）は MIT License ではなく、<a
+      href="https://ai.google.dev/gemma/terms"
+      target="_blank"
+      rel="noreferrer">Gemma利用規約</a
+    >と<a
+      href="https://ai.google.dev/gemma/prohibited_use_policy"
+      target="_blank"
+      rel="noreferrer">Gemma禁止用途ポリシー</a
+    >が適用されます。
   </p>
 
   <h2>禁止事項・免責事項</h2>
@@ -64,6 +97,10 @@
       href="https://huggingface.co/phasefield-audio/Irodori-TTS-v4.1-Anime#license"
       target="_blank"
       rel="noreferrer">Animeモデルの利用条件</a
+    >・<a
+      href="https://huggingface.co/Aratako/Irodori-TTS-v4.1-Small-MF"
+      target="_blank"
+      rel="noreferrer">MFモデルの利用条件</a
     >をご確認ください。
   </p>
 </div>

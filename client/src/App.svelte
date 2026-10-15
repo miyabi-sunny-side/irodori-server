@@ -2,12 +2,11 @@
   import Header from "./lib/Header.svelte";
   import { initRouter, router } from "./lib/router.svelte";
   import { routes } from "./lib/routes";
-  import Create from "./pages/Create.svelte";
   import Credits from "./pages/Credits.svelte";
   import Dictionary from "./pages/Dictionary.svelte";
   import History from "./pages/History.svelte";
-  import Batch from "./pages/Batch.svelte";
-  import References from "./pages/References.svelte";
+  import Script from "./pages/Script.svelte";
+  import Voices from "./pages/Voices.svelte";
 
   $effect(() => initRouter());
 
@@ -29,11 +28,9 @@
   {:else if router.index === 3}
     <Credits />
   {:else if router.index === 4}
-    <References />
-  {:else if router.index === 5}
-    <Batch />
+    <Voices />
   {:else}
-    <Create />
+    <Script />
   {/if}
 </main>
 

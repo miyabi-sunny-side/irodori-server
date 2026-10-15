@@ -1,12 +1,13 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  buildRequest,
   clampNumber,
-  defaultForm,
+  defaultRequest,
+  parseSteps,
   insertText,
   moveItem,
   parseVolume,
+  trimRequest,
 } from "./create";
 
 describe("insertText", () => {
@@ -67,20 +68,19 @@ describe("clampNumber", () => {
   });
 });
 
-describe("buildRequest", () => {
-  it("sends every field of the generate contract with the Gradio defaults", () => {
-    const request = buildRequest({ ...defaultForm(), text: "こんにちは。" }, [
-      { id: 3, name: "a.wav" },
-    ]);
-    expect(request).toEqual({
+describe("defaultRequest and trimRequest", () => {
+  it("send every field of the generate contract with the Gradio defaults", () => {
+    expect(trimRequest({ ...defaultRequest(), text: "こんにちは。" })).toEqual({
       model: "Aratako/Irodori-TTS-v4.1-Small",
       mode: "design",
       caption: "",
-      reference_ids: [3],
+      reference_ids: [],
+      voice_id: null,
       text: "こんにちは。",
       dictionary_enabled: true,
       speed: 1,
-      num_steps: 40,
+      silence: 0,
+      num_steps: null,
       num_candidates: 1,
       duration_scale: 1,
       seed: "",
@@ -88,10 +88,10 @@ describe("buildRequest", () => {
       cfg_scale_text: 3,
       cfg_scale_caption: 4,
       cfg_scale_speaker: 5,
-      model_device: "cpu",
-      model_precision: "fp32",
-      codec_device: "cpu",
-      codec_precision: "fp32",
+      model_device: "",
+      model_precision: "",
+      codec_device: "",
+      codec_precision: "",
       t_schedule_mode: "linear",
       sway_coeff: -1,
       cfg_guidance_mode: "independent",
@@ -109,14 +109,23 @@ describe("buildRequest", () => {
     });
   });
 
-  it("keeps the reference order and trims the free-text fields", () => {
-    const form = { ...defaultForm(), seed: " 42 ", lora_adapter_raw: " " };
-    const request = buildRequest(form, [
-      { id: 7, name: "b.wav" },
-      { id: 2, name: "a.wav" },
-    ]);
-    expect(request.reference_ids).toEqual([7, 2]);
+  it("trims the free-text fields", () => {
+    const request = trimRequest({
+      ...defaultRequest(),
+      seed: " 42 ",
+      lora_adapter_raw: " ",
+    });
     expect(request.seed).toBe("42");
     expect(request.lora_adapter_raw).toBe("");
+  });
+});
+
+describe("parseSteps", () => {
+  it("leaves a blank to the model and clamps numbers to 1–120", () => {
+    expect(parseSteps("")).toBeNull();
+    expect(parseSteps(" ")).toBeNull();
+    expect(parseSteps("8")).toBe(8);
+    expect(parseSteps("0")).toBe(1);
+    expect(parseSteps("500")).toBe(120);
   });
 });

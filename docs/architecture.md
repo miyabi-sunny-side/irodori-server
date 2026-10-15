@@ -4,11 +4,12 @@ irodori-server は Rust (axum) のサーバーと Svelte 5 の画面、推論を
 
 ```text
 ブラウザ ── HTTP ── irodori-server (Rust)
-                     ├─ data/irodori.sqlite3    生成の記録・参照音声・読み辞書
+                     ├─ data/irodori.sqlite3    生成の記録・話者・参照音声・台本・読み辞書
                      ├─ data/audio/*.wav        生成した音声
+                     ├─ data/voices/*.wav       話者の参照音声 (WAV に変換した複製)
                      ├─ data/references/*       アップロードした参照音声
                      └─ HTTP (IRODORI_ENGINE_URL) ── 推論エンジン: .venv/bin/python irodori_engine.py
-                                                      └─ Irodori-TTS (固定 revision) の _run_generation
+                                                      └─ Irodori-TTS (固定 revision 89f9d8f) の _run_generation
 ```
 
 推論エンジンは別のマシンで動かせます。家庭内では GPU のある homeserver のエンジンを、
@@ -30,23 +31,54 @@ homeserver の本番サーバーと sandbox の開発用サーバーの両方が
 - サーバーはエンジンを起動・再起動しません。エンジンの再起動は systemd と開発担当が持ちます。
   エンジンに届かない要求は `503`、応答の途中で接続が切れた要求は `502` として返します。
   生成はモデルの取得を含めて長くかかるため、サーバーは応答待ちを打ち切りません (接続の確立だけ 5 秒で諦めます)。
-- エンジンは `_run_generation` を呼んで WAV を返すだけです。辞書の置換・話速・記録・最終ファイルはサーバーが持ち、
-  SQLite と `data/audio` へ書くのはサーバーだけです。
+- エンジンは `_run_generation` を呼んで WAV を返すだけです。辞書の置換・話速・末尾の無音・記録・最終ファイルはサーバーが持ち、
+  SQLite と `data/` へ書くのはサーバーだけです。
+- upstream `89f9d8f` の `_run_generation` は MeanFlow (MF) と v4-Large を扱えます。計算回数を空欄にすると MF は 4 回で、
+  CFG と Sway を無視します。量子化版は `repo/subfolder` の checkpoint 名で取得します。
+  EasyIrodoriTTS v2.0 は `inference_runtime` を直接呼びますが、ここでは `_run_generation` の境界を保ちました。
+- モデルの性質 (計算回数の標準・MF か・量子化か・必要な GPU) は `src/generation.rs` の `MODELS` だけが持ち、
+  `/api/info` で画面へ渡します。量子化版は cuda・bf16 で動かし、INT4 は compute capability 8.0 以上を要します
+  (エンジンの `/info` が `cuda_capability` を返します)。
 - ブラウザを閉じても生成は最後まで進み、記録されます。
 - 推論エンジンが保持するモデルは 1 つです。モデル・機器・精度の組が変わると読み直します。
-  画面と API の既定 (bf16 を扱える機器では bf16) をそろえ、交互に使っても読み直さないようにしています。
+  機器と精度は空欄ならエンジンの先頭の選択肢 (bf16 を扱える機器では bf16) を使い、交互に使っても読み直さないようにしています。
+  話者ごとにモデルが違う台本は、話者が変わるたびにモデルを読み直します。
 - torch.compile は使いません。RTX 3060 の実測では `dynamic=True` はコンパイルに失敗し、
   `dynamic=False` は初回 145 秒、文章の長さが変わるたびに 20〜36 秒の再コンパイルがかかりました。
 
 ## 記録とファイルの整合
 
 生成では、推論エンジンから受け取った WAV を `data/tmp/<batch>/` に一時名で書き、そのまま仕上げます。
-話速を変える場合は ffmpeg の `atempo` で一時ファイルに書き出します。
+話速や末尾の無音を変える場合は ffmpeg の `atempo`・`apad` で一時ファイルに書き出します。
 仕上がった WAV を `data/audio/<batch>_<候補番号>.wav` へ移し、その後に全候補の記録を 1 つのトランザクションで確定します。
 記録に失敗したら移したファイルを消します。`data/tmp/<batch>/` は成否にかかわらず消します。
 
 削除では、先に記録を消してからファイルを消します。
 ファイルを消せなかった場合は `file_errors` に残し、履歴の画面に表示します。
+
+## 話者と台本
+
+話者 (`voices` テーブル) は名前・モデル・話し方・参照音声の組で、名前だけを `revision` 付きで変えられます。
+参照音声は登録時に ffmpeg で WAV に変換して `data/voices/` へ複製し、長さ (1〜120 秒) を WAV の見出しから測ります。
+削除は印を付けて一覧から外すだけで、参照音声は消しません。処理待ちの生成がその音声を使えるようにするためです。
+
+台本は `script` テーブルの 1 行に JSON で保存し、`revision` で他の画面との衝突を検出します。
+各カードの最新の音声は `script_results` (カード ID・生成 ID・作ったときの入力の署名・失敗の理由) に分けて持ち、
+編集の保存で音声の記録を上書きしないようにしています。カードの状態は、署名と今の入力の比較から読み出すたびに求めます。
+
+台本の生成はサーバーのタスクで 1 件ずつ進めます。開始時に各カードの生成要求と署名を固定し、
+カードごとに通常の生成と同じ経路 (生成履歴にも記録) で作ります。進み具合はメモリにだけ置き、
+サーバーを再起動すると止まります (作った音声は残ります)。つなげた WAV は ffmpeg の `concat`、ZIP は無圧縮で作ります。
+
+## データベースの移行
+
+`PRAGMA user_version` で版を判定し、起動時に順に移行します。
+
+- 4 (EasyIrodoriTTS v2.0 の取り込み): `voices`・`script`・`script_results` を作り、`generations.voice_id` を足します。
+  キャラクター名の付いたお手本 (`references_audio.character`) は、1 件ずつ同じ名前の話者にします。
+  元の生成が残っていればそのモデルと話し方 (声の作り方が design・both のときの caption)、
+  無ければ標準モデルと空の話し方です。参照音声のファイルはそのまま話者が使い、お手本の行は消します。
+  アップロードしただけの参照音声と生成履歴は残します。
 
 ## 読み辞書
 

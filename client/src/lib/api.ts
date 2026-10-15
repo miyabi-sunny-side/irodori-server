@@ -1,5 +1,7 @@
 // Typed access to the irodori-server JSON API (docs/api.md).
 
+import type { ScriptCard } from "./script";
+
 export interface Choice {
   id: string;
   label: string;
@@ -11,8 +13,17 @@ export interface EmojiItem {
   description: string;
 }
 
+/** A model and what the screen needs to know about it (one table on the server). */
+export interface Model extends Choice {
+  steps: number;
+  /** MeanFlow models ignore CFG and the Sway schedule. */
+  meanflow: boolean;
+  /** Quantized models run only on CUDA in bf16. */
+  quantized: boolean;
+}
+
 export interface Info {
-  models: Choice[];
+  models: Model[];
   modes: Choice[];
   devices: string[];
   precisions: Record<string, string[]>;
@@ -25,10 +36,13 @@ export interface GenerateRequest {
   mode: string;
   caption: string;
   reference_ids: number[];
+  voice_id: number | null;
   text: string;
   dictionary_enabled: boolean;
   speed: number;
-  num_steps: number;
+  silence: number;
+  /** Blank takes the model's own steps. */
+  num_steps: number | null;
   num_candidates: number;
   duration_scale: number;
   seed: string;
@@ -70,30 +84,77 @@ export interface Generation {
   seed: string | null;
   speed: number;
   audio_url: string;
-  /** Saved as a reference; bulk deletion keeps it. */
+  /** Registered as a voice; bulk deletion keeps it. */
   saved: boolean;
-  /** Set when every reference used belongs to one character. */
+  /** The voice's name when a registered voice spoke it. */
   character: string | null;
   /** Marked with ★; bulk deletion keeps it. */
   favorite: boolean;
+  voice_id: number | null;
+  /** A script card's current audio; bulk deletion keeps it. */
+  scripted: boolean;
 }
 
-/** Progress of a まとめて生成 run, kept in server memory. */
-export interface Batch {
+/** A registered voice (話者): name, model, speaking style and one reference. */
+export interface Voice {
+  id: number;
+  created_at: string;
+  name: string;
+  model: string;
+  caption: string;
+  source_generation_id: number | null;
+  revision: number;
+  audio_url: string;
+}
+
+export type CardStatus =
+  | "empty"
+  | "no_voice"
+  | "new"
+  | "queued"
+  | "running"
+  | "done"
+  | "changed"
+  | "failed";
+
+/** One card's state as the server sees the saved script. */
+export interface CardView {
   id: string;
-  character: string;
+  status: CardStatus;
+  error: string;
+  generation_id: number | null;
+  audio_url: string | null;
+  download_name: string | null;
+}
+
+export interface ScriptOptions {
+  inherit: boolean;
+  pattern: string;
+  txt: boolean;
+}
+
+export interface Script {
+  cards: ScriptCard[];
+  settings: GenerateRequest;
+  dictionary_enabled: boolean;
+  options: ScriptOptions;
+}
+
+export interface ScriptJob {
+  pending: string[];
+  running: boolean;
   total: number;
   done: number;
-  generation_ids: number[];
-  failed: { line: string; error: string }[];
+  failed: number;
+  stopping: boolean;
   finished: boolean;
 }
 
-export interface BatchSettings {
-  mode: string;
-  caption: string;
-  num_steps: number;
-  speed: number;
+export interface ScriptState {
+  revision: number;
+  script: Script;
+  cards: CardView[];
+  job: ScriptJob | null;
 }
 
 export interface FileError {
@@ -102,14 +163,11 @@ export interface FileError {
   created_at: string;
 }
 
-/** Reference audio for voice cloning. Uploads carry only id and name. */
+/** An uploaded reference audio. */
 export interface Reference {
   id: number;
   name: string;
-  character?: string | null;
-  created_at?: string;
-  source_generation_id?: number | null;
-  audio_url?: string;
+  audio_url: string;
 }
 
 export interface DictionaryEntry {
@@ -187,24 +245,55 @@ export const api = {
       `/api/generations/${id}/favorite`,
       sendJson("PUT", { favorite }),
     ),
-  startBatch: (character: string, lines: string, settings: BatchSettings) =>
-    request<{ id: string; total: number }>(
-      "/api/batches",
-      sendJson("POST", { character, lines, settings }),
+  voices: (signal?: AbortSignal) =>
+    request<{ voices: Voice[] }>("/api/voices", { signal }),
+  addVoice: (body: {
+    name: string;
+    model: string;
+    caption: string;
+    generation_id?: number;
+    reference_id?: number;
+  }) => request<Voice>("/api/voices", sendJson("POST", body)),
+  renameVoice: (voice: Voice, name: string) =>
+    request<Voice>(
+      `/api/voices/${voice.id}`,
+      sendJson("PATCH", { name, revision: voice.revision }),
     ),
-  batch: (id: string, signal?: AbortSignal) =>
-    request<Batch>(`/api/batches/${encodeURIComponent(id)}`, { signal }),
-  batches: (signal?: AbortSignal) =>
-    request<{ batches: Batch[] }>("/api/batches", { signal }),
-  saveReference: (generationId: number, character: string) =>
-    request<Reference>(
-      `/api/generations/${generationId}/reference`,
-      sendJson("POST", { character }),
+  deleteVoice: (id: number) =>
+    request<void>(`/api/voices/${id}`, { method: "DELETE" }),
+  script: (signal?: AbortSignal) =>
+    request<ScriptState>("/api/script", { signal }),
+  saveScript: (revision: number, script: Script) =>
+    request<ScriptState>("/api/script", sendJson("PUT", { revision, script })),
+  generateScript: (revision: number, target: string) =>
+    request<ScriptState>(
+      "/api/script/generate",
+      sendJson("POST", { revision, target }),
     ),
-  references: (signal?: AbortSignal) =>
-    request<{ references: Reference[] }>("/api/references", { signal }),
-  deleteReference: (id: number) =>
-    request<void>(`/api/references/${id}`, { method: "DELETE" }),
+  stopScript: () =>
+    request<ScriptState>("/api/script/stop", { method: "POST" }),
+  playlist: (from?: string) =>
+    request<{ items: { id: string; audio_url: string }[] }>(
+      `/api/script/playlist${from ? `?from=${encodeURIComponent(from)}` : ""}`,
+    ),
+  /** The joined WAV or the ZIP of every card, as a file for the browser to save. */
+  exportScript: async (kind: "wav" | "zip"): Promise<Blob> => {
+    let response: Response;
+    try {
+      response = await fetch(`/api/script/export?kind=${kind}`);
+    } catch {
+      throw new ApiError(
+        "サーバーに接続できませんでした。サーバーが動いているか確認して、もう一度お試しください。",
+      );
+    }
+    if (!response.ok) {
+      const body = (await response.json().catch(() => ({}))) as {
+        error?: string;
+      };
+      throw new ApiError(body.error ?? "保存できませんでした。");
+    }
+    return response.blob();
+  },
   uploadReference: (file: File) => {
     const form = new FormData();
     form.append("file", file);

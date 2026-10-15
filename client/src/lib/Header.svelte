@@ -4,10 +4,9 @@
 
   // 音声作成 is reached from the app name, so it is not repeated here.
   const PAGES = [
-    ["/batch", "まとめて生成"],
+    ["/voices", "声の登録"],
     ["/dictionary", "読み辞書"],
     ["/history", "生成履歴"],
-    ["/references", "お手本"],
     ["/credits", "クレジット・利用条件"],
   ] as const;
 

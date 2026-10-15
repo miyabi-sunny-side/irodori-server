@@ -1,14 +1,11 @@
 // Pure helpers behind the 音声作成 page. Kept free of DOM and fetch so they
 // can be unit-tested; the page and its module state call into them.
 
-import type { GenerateRequest, Reference } from "./api";
+import type { GenerateRequest } from "./api";
 
 export const DEFAULT_VOLUME = 0.75;
 
-/** The editable form; references are kept separately with their names. */
-export type CreateForm = Omit<GenerateRequest, "reference_ids">;
-
-// Free-text fields the worker parses; surrounding spaces are never meant.
+// Free-text fields the engine parses; surrounding spaces are never meant.
 const TRIMMED_FIELDS = [
   "seed",
   "seconds",
@@ -22,15 +19,19 @@ const TRIMMED_FIELDS = [
   "lora_adapter_raw",
 ] as const;
 
-export function defaultForm(): CreateForm {
+/** The generate contract with the Gradio version's initial values. */
+export function defaultRequest(): GenerateRequest {
   return {
     model: "Aratako/Irodori-TTS-v4.1-Small",
     mode: "design",
     caption: "",
+    reference_ids: [],
+    voice_id: null,
     text: "",
     dictionary_enabled: true,
     speed: 1,
-    num_steps: 40,
+    silence: 0,
+    num_steps: null,
     num_candidates: 1,
     duration_scale: 1,
     seed: "",
@@ -38,10 +39,10 @@ export function defaultForm(): CreateForm {
     cfg_scale_text: 3,
     cfg_scale_caption: 4,
     cfg_scale_speaker: 5,
-    model_device: "cpu",
-    model_precision: "fp32",
-    codec_device: "cpu",
-    codec_precision: "fp32",
+    model_device: "",
+    model_precision: "",
+    codec_device: "",
+    codec_precision: "",
     t_schedule_mode: "linear",
     sway_coeff: -1,
     cfg_guidance_mode: "independent",
@@ -59,18 +60,18 @@ export function defaultForm(): CreateForm {
   };
 }
 
-export function buildRequest(
-  form: CreateForm,
-  references: Reference[],
-): GenerateRequest {
+/** Trims the free-text fields before a request is sent. */
+export function trimRequest(request: GenerateRequest): GenerateRequest {
   const trimmed = Object.fromEntries(
-    TRIMMED_FIELDS.map((key) => [key, form[key].trim()]),
+    TRIMMED_FIELDS.map((key) => [key, request[key].trim()]),
   );
-  return {
-    ...form,
-    ...trimmed,
-    reference_ids: references.map((reference) => reference.id),
-  };
+  return { ...request, ...trimmed };
+}
+
+/** A blank step count means the model's own; otherwise 1–120. */
+export function parseSteps(raw: string): number | null {
+  const value = Number.parseInt(raw, 10);
+  return Number.isFinite(value) ? Math.min(120, Math.max(1, value)) : null;
 }
 
 export function insertText(

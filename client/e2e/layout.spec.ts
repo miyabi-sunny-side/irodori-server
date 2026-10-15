@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-import { generation, mockBackend, savedReference } from "./mock";
+import { card, generation, mockBackend, voice } from "./mock";
 
 // Set SHOTS=<dir> to keep full-page screenshots for visual review.
 const shots = process.env.SHOTS;
@@ -9,6 +9,7 @@ const LONG_TEXT =
   "今日はとても良い天気ですね。長い文章でも画面の幅を超えずに折り返されることを確かめるための文章です。".repeat(
     3,
   );
+const LONG_NAME = "とても長い話者の名前".repeat(4);
 
 for (const viewport of [
   { width: 1440, height: 900 },
@@ -21,36 +22,23 @@ for (const viewport of [
     }) => {
       await page.setViewportSize(viewport);
       await page.emulateMedia({ colorScheme });
-      await mockBackend(page, {
+      const backend = await mockBackend(page, {
+        voices: [
+          voice(1, "ひかり", { caption: "明るく、親しみやすい口調で話す。" }),
+          voice(2, LONG_NAME, { model: "Aratako/Irodori-TTS-v4.1-Small" }),
+        ],
+        cards: [
+          card("a", "おはようございます。", { voice_id: 1 }),
+          card("b", LONG_TEXT, { voice_id: 2, speed: 1.25, silence: 1.5 }),
+          card("c", "失敗する台詞", { voice_id: 1 }),
+          card("d", ""),
+        ],
         generations: [
           generation(2, LONG_TEXT, { speed: 1.25, saved: true }),
-          generation(11, "星の声", {
-            character: "とても長いキャラクター名".repeat(4),
-            favorite: true,
-          }),
+          generation(11, "星の声", { character: LONG_NAME, favorite: true }),
           ...Array.from({ length: 8 }, (_, i) =>
             generation(3 + i, `音声 ${i}`),
           ),
-        ],
-        references: [
-          savedReference(1, "あかり", 2),
-          savedReference(2, "あかり", 3),
-          savedReference(3, "とても長いキャラクター名".repeat(4), 4),
-        ],
-        batches: [
-          {
-            id: "batch-1",
-            character: "とても長いキャラクター名".repeat(4),
-            total: 3,
-            done: 3,
-            generation_ids: [11],
-            failed: [
-              { line: LONG_TEXT, error: "生成できませんでした。" },
-              { line: "短い台詞", error: "生成できませんでした。" },
-            ],
-            finished: true,
-            pending: [],
-          },
         ],
         dictionary: [
           { word: "Irodori", reading: "いろどり" },
@@ -59,38 +47,46 @@ for (const viewport of [
       });
 
       await page.goto("/");
-      const generate = page.getByRole("button", { name: "音声を生成する" });
-      await expect(generate).toBeEnabled();
+      const generate = page.getByRole("button", {
+        name: "未生成・変更分を生成",
+      });
+      await expect(generate).toBeVisible();
       expect(
         await page.evaluate(
           () => getComputedStyle(document.body).backgroundColor,
         ),
       ).toBe(colorScheme === "dark" ? "rgb(25, 25, 25)" : "rgb(250, 246, 239)");
       expect(await page.locator("header").locator("a, button").count()).toBe(2);
-      if (shots) {
-        await page.screenshot({
-          path: `${shots}/first-view-${viewport.width}-${colorScheme}.png`,
-        });
-      }
-      if (viewport.width === 1440) {
-        const box = await generate.boundingBox();
-        expect(box!.y + box!.height).toBeLessThanOrEqual(viewport.height);
-      }
+      const box = await generate.boundingBox();
+      expect(box!.y + box!.height).toBeLessThanOrEqual(viewport.height);
 
-      await page.getByLabel("読み上げる文章").fill(LONG_TEXT);
-      await page.getByText("生成設定", { exact: true }).click();
-      await page.getByRole("spinbutton", { name: "生成する候補数" }).fill("2");
-      await page.getByRole("spinbutton", { name: "生成する候補数" }).blur();
+      // Generated, failed, long and empty cards with the settings open.
       await generate.click();
-      await expect(page.locator("audio.player")).toBeVisible();
-      await page.getByText("詳細設定（通常は変更不要）").click();
+      await page
+        .getByRole("dialog", { name: "長いセリフの生成" })
+        .getByRole("button", { name: "このまま生成" })
+        .click();
+      await expect(page.getByRole("status").first()).toContainText(
+        "生成が終わりました",
+      );
+      expect(backend.job?.failed).toBe(1);
+      await page
+        .getByRole("button", { name: "セリフ 1に絵文字を挿入" })
+        .click();
+      for (const summary of [
+        "生成設定",
+        "詳細設定（通常は変更不要）",
+        "オプション",
+        "入力済データ",
+      ]) {
+        await page.getByText(summary, { exact: true }).click();
+      }
 
       for (const path of [
         "/",
+        "/voices",
         "/dictionary",
         "/history",
-        "/references",
-        "/batch",
         "/credits",
       ]) {
         if (path !== "/") {
@@ -104,7 +100,7 @@ for (const viewport of [
         expect(width, path).toBe(viewport.width);
         if (shots) {
           await page.evaluate(() => window.scrollTo(0, 0));
-          const name = path === "/" ? "create" : path.slice(1);
+          const name = path === "/" ? "script" : path.slice(1);
           await page.screenshot({
             path: `${shots}/${name}-${viewport.width}-${colorScheme}.png`,
             fullPage: true,

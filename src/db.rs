@@ -128,6 +128,8 @@ pub struct Generation {
     /// The voice's name, for generations spoken by a registered voice.
     pub character: Option<String>,
     pub voice_id: Option<i64>,
+    /// A script card's current audio, so bulk deletion keeps it.
+    pub scripted: bool,
     /// Marked with ★, so bulk deletion keeps it.
     pub favorite: bool,
 }
@@ -507,7 +509,8 @@ const SELECT_GENERATION: &str =
     "SELECT id, batch, candidate, created_at, text, text_applied, mode, caption,
     reference_ids, model, seed, speed, params, log, path,
     EXISTS (SELECT 1 FROM voices v WHERE v.source_generation_id = generations.id AND v.deleted = 0),
-    character, favorite, voice_id
+    character, favorite, voice_id,
+    EXISTS (SELECT 1 FROM script_results s WHERE s.generation_id = generations.id)
     FROM generations";
 
 const SELECT_VOICE: &str =
@@ -554,6 +557,7 @@ fn generation_row(row: &rusqlite::Row) -> rusqlite::Result<Generation> {
         character: row.get(16)?,
         favorite: row.get(17)?,
         voice_id: row.get(18)?,
+        scripted: row.get(19)?,
     })
 }
 
@@ -597,6 +601,7 @@ mod tests {
             character: None,
             favorite: false,
             voice_id: None,
+            scripted: false,
         }
     }
 
@@ -822,6 +827,7 @@ mod tests {
         assert_eq!(voice.source_generation_id, Some(rows[1].id));
         assert!(db.generation(rows[1].id).unwrap().unwrap().saved);
         db.set_card_audio("card", rows[2].id, "sig").unwrap();
+        assert!(db.generation(rows[2].id).unwrap().unwrap().scripted);
 
         let removed = db.delete_unsaved_generations().unwrap();
         assert_eq!(

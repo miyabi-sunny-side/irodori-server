@@ -113,6 +113,10 @@ test("credits keep the Gradio version's attributions", async ({ page }) => {
     page.getByRole("link", { name: "phasefield-audio" }),
   ).toBeVisible();
   await expect(
+    page.getByRole("link", { name: "Aratako / Irodori-TTS-v4.1-Small-MF" }),
+  ).toBeVisible();
+  await expect(page.getByRole("link", { name: "Gemma利用規約" })).toBeVisible();
+  await expect(
     page.getByText("本人の同意なしに声を複製して公開したり"),
   ).toBeVisible();
 });
