@@ -9,6 +9,7 @@ The server writes every database row and final file.
 from __future__ import annotations
 
 import base64
+import gc
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import json
 import os
@@ -95,8 +96,24 @@ def unload(upstream, _body):
 OPS = {"info": info, "generate": generate, "unload": unload}
 
 
-def run_captured(call):
-    """Runs call() with fds 1 and 2 captured; returns its reply with ok and engine_log."""
+def is_out_of_memory(exc):
+    """torch raises OutOfMemoryError, or a RuntimeError saying so; the server matches the same words."""
+    return type(exc).__name__ == "OutOfMemoryError" or "out of memory" in str(exc).lower()
+
+
+def release_memory(upstream):
+    """Drops the cached model and whatever a failed load left behind, without waiting for the next request."""
+    upstream._clear_runtime_cache()
+    gc.collect()
+    import torch
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
+def run_captured(call, release):
+    """Runs call() with fds 1 and 2 captured; returns its reply with ok and engine_log.
+
+    After an out-of-memory failure it calls release() before replying."""
     sys.stdout.flush()
     sys.stderr.flush()
     saved = os.dup(1), os.dup(2)
@@ -104,12 +121,21 @@ def run_captured(call):
         os.dup2(capture.fileno(), 1)
         os.dup2(capture.fileno(), 2)
         try:
-            reply = call()
-            reply["ok"] = True
-        except Exception as exc:  # reported to the server, which maps it to a user message
-            traceback.print_exc()
-            reply = {"ok": False, "error_type": type(exc).__name__, "error": str(exc),
-                     "trace": traceback.format_exc()}
+            out_of_memory = False
+            try:
+                reply = call()
+                reply["ok"] = True
+            except Exception as exc:  # reported to the server, which maps it to a user message
+                traceback.print_exc()
+                reply = {"ok": False, "error_type": type(exc).__name__, "error": str(exc),
+                         "trace": traceback.format_exc()}
+                out_of_memory = is_out_of_memory(exc)
+            # Outside the except block, so the failed call's frames and tensors are already unreferenced.
+            if out_of_memory:
+                try:
+                    release()
+                except Exception:
+                    traceback.print_exc()
         finally:
             sys.stdout.flush()
             sys.stderr.flush()
@@ -136,7 +162,7 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError(f"unknown op: {self.path}")
             return op(self.upstream, json.loads(raw or b"{}"))
 
-        reply = run_captured(call)
+        reply = run_captured(call, lambda: release_memory(self.upstream))
         data = json.dumps(reply, ensure_ascii=False).encode()
         self.send_response(200 if reply["ok"] else 500)
         self.send_header("Content-Type", "application/json")
