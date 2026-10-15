@@ -3,13 +3,62 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-pub const MODELS: &[(&str, &str)] = &[
-    ("Aratako/Irodori-TTS-v4.1-Small", "ベース（標準モデル）"),
-    (
-        "phasefield-audio/Irodori-TTS-v4.1-Anime",
-        "Anime（派生版のアニメ声強化モデル）",
-    ),
+/// What the server, the screen and the engine need to know about a model; nothing else repeats it.
+#[derive(Debug, PartialEq, Serialize)]
+pub struct Model {
+    pub id: &'static str,
+    pub label: &'static str,
+    /// Steps used when the request leaves `num_steps` blank.
+    pub steps: u32,
+    /// `MeanFlow` checkpoints ignore CFG and the Sway schedule.
+    pub meanflow: bool,
+    /// Quantized checkpoints run only on CUDA in bf16.
+    pub quantized: bool,
+    /// Lowest CUDA compute capability the checkpoint runs on.
+    pub min_cuda_capability: Option<(u32, u32)>,
+}
+
+const fn model(id: &'static str, label: &'static str, steps: u32) -> Model {
+    Model {
+        id,
+        label,
+        steps,
+        meanflow: false,
+        quantized: false,
+        min_cuda_capability: None,
+    }
+}
+
+pub const MODELS: &[Model] = &[
+    model("Aratako/Irodori-TTS-v4.1-Small", "標準", 40),
+    model("phasefield-audio/Irodori-TTS-v4.1-Anime", "Anime", 40),
+    Model {
+        meanflow: true,
+        ..model("Aratako/Irodori-TTS-v4.1-Small-MF", "MF（高速）", 4)
+    },
+    model("Aratako/Irodori-TTS-v4-Large", "Large（通常版）", 40),
+    Model {
+        quantized: true,
+        ..model(
+            "Aratako/Irodori-TTS-v4-Large-Quantized/int8-weight-only",
+            "Large（省メモリ・INT8）",
+            40,
+        )
+    },
+    Model {
+        quantized: true,
+        min_cuda_capability: Some((8, 0)),
+        ..model(
+            "Aratako/Irodori-TTS-v4-Large-Quantized/int4-weight-only",
+            "Large（省メモリ・INT4）",
+            40,
+        )
+    },
 ];
+
+pub fn find_model(id: &str) -> Option<&'static Model> {
+    MODELS.iter().find(|m| m.id == id)
+}
 pub const MODES: &[(&str, &str)] = &[
     ("design", "言葉で声を作る（ボイスデザイン）"),
     ("clone", "お手本の声に似せる（ボイスクローン）"),
@@ -80,7 +129,7 @@ const EMOJI_CATEGORIES: &[(&str, &[&str])] = &[
         ],
     ),
 ];
-const MAX_TEXT_CHARS: usize = 10_000;
+pub const MAX_TEXT_CHARS: usize = 10_000;
 const MAX_RAW_CHARS: usize = 500;
 pub const MAX_REFERENCES: usize = 16;
 
@@ -92,10 +141,15 @@ pub struct GenerateRequest {
     pub mode: String,
     pub caption: String,
     pub reference_ids: Vec<i64>,
+    /// A registered voice; its model, speaking style and reference replace the fields above.
+    pub voice_id: Option<i64>,
     pub text: String,
     pub dictionary_enabled: bool,
     pub speed: f64,
-    pub num_steps: u32,
+    /// Seconds of silence appended to the end.
+    pub silence: f64,
+    /// Blank takes the model's own step count.
+    pub num_steps: Option<u32>,
     pub num_candidates: u32,
     pub duration_scale: f64,
     pub seed: String,
@@ -126,14 +180,16 @@ pub struct GenerateRequest {
 impl Default for GenerateRequest {
     fn default() -> Self {
         Self {
-            model: MODELS[0].0.into(),
+            model: MODELS[0].id.into(),
             mode: "design".into(),
             caption: String::new(),
             reference_ids: Vec::new(),
+            voice_id: None,
             text: String::new(),
             dictionary_enabled: true,
             speed: 1.0,
-            num_steps: 40,
+            silence: 0.0,
+            num_steps: None,
             num_candidates: 1,
             duration_scale: 1.0,
             seed: String::new(),
@@ -169,6 +225,9 @@ pub struct Runtime {
     pub devices: Vec<String>,
     pub precisions: std::collections::BTreeMap<String, Vec<String>>,
     pub max_candidates: u32,
+    /// Compute capability of the engine's CUDA device, when it has one.
+    #[serde(default)]
+    pub cuda_capability: Option<(u32, u32)>,
 }
 
 impl GenerateRequest {
@@ -180,17 +239,32 @@ impl GenerateRequest {
         matches!(self.mode.as_str(), "design" | "both")
     }
 
-    /// Checks the request before any work starts; the message is shown to the user.
-    pub fn validate(&self, runtime: &Runtime) -> Result<(), String> {
-        let known =
-            |choices: &[(&str, &str)], value: &str| choices.iter().any(|(id, _)| *id == value);
-        if !known(MODELS, &self.model) || !known(MODES, &self.mode) {
+    /// Takes the model, speaking style and reference from a registered voice.
+    pub fn voiced_by(&mut self, model: &str, caption: &str) {
+        model.clone_into(&mut self.model);
+        caption.clone_into(&mut self.caption);
+        self.mode = if caption.trim().is_empty() {
+            "clone"
+        } else {
+            "both"
+        }
+        .into();
+        self.reference_ids.clear();
+    }
+
+    /// Checks the request before any work starts and settles the model precision;
+    /// the message is shown to the user. `references` counts the audio the engine will get.
+    pub fn validate(&mut self, runtime: &Runtime, references: usize) -> Result<(), String> {
+        let Some(model) = find_model(&self.model) else {
+            return Err("モデルと声の作り方を一覧から選んでください。".into());
+        };
+        if !MODES.iter().any(|(id, _)| *id == self.mode) {
             return Err("モデルと声の作り方を一覧から選んでください。".into());
         }
         if self.text.trim().is_empty() {
             return Err("文章が空欄です。文章欄に読み上げたい文章を入力してください。".into());
         }
-        if self.uses_references() && self.reference_ids.is_empty() {
+        if self.uses_references() && references == 0 {
             return Err(
                 "お手本の音声がありません。声の設定に音声ファイルを追加してください。".into(),
             );
@@ -224,8 +298,16 @@ impl GenerateRequest {
         if !(0.75..=1.5).contains(&self.speed) {
             return Err("話速は0.75～1.50倍で指定してください。".into());
         }
+        if !(0.0..=10.0).contains(&self.silence) {
+            return Err("末尾の無音は0～10秒で指定してください。".into());
+        }
         let ranges = [
-            ("生成の計算回数", f64::from(self.num_steps), 1.0, 120.0),
+            (
+                "生成の計算回数",
+                f64::from(self.num_steps.unwrap_or(model.steps)),
+                1.0,
+                120.0,
+            ),
             (
                 "生成する候補数",
                 f64::from(self.num_candidates),
@@ -246,6 +328,8 @@ impl GenerateRequest {
         if !self.cfg_min_t.is_finite() || !self.cfg_max_t.is_finite() {
             return Err("条件反映の開始位置と終了位置は数値で指定してください。".into());
         }
+        self.model_precision =
+            resolve_model_precision(model, &self.model_device, &self.model_precision, runtime)?;
         let supports = |device: &str, precision: &str| {
             runtime.devices.iter().any(|d| d == device)
                 && runtime
@@ -269,6 +353,9 @@ impl GenerateRequest {
     /// Keyword arguments for upstream `_run_generation`, except `ref_wavs`, which the engine
     /// fills with its copies of the references sent beside them.
     pub fn engine_params(&self, text_applied: &str) -> Value {
+        let steps = self
+            .num_steps
+            .or_else(|| find_model(&self.model).map(|m| m.steps));
         json!({
             "checkpoint": self.model,
             "model_device": self.model_device,
@@ -277,7 +364,7 @@ impl GenerateRequest {
             "codec_precision": self.codec_precision,
             "text": text_applied,
             "caption": if self.uses_caption() { self.caption.as_str() } else { "" },
-            "num_steps": self.num_steps,
+            "num_steps": steps,
             "num_candidates": self.num_candidates,
             "seed_raw": self.seed,
             "seconds_raw": self.seconds,
@@ -303,45 +390,45 @@ impl GenerateRequest {
     }
 }
 
-/// Trims and checks a character name for a saved reference.
-pub fn character_name(raw: &str) -> Result<String, &'static str> {
+/// The model precision to run with. Quantized checkpoints need CUDA with bf16, and some a
+/// newer GPU (`EasyIrodoriTTS` v2.0 `resolve_model_precision`); other models keep the request.
+pub fn resolve_model_precision(
+    model: &Model,
+    device: &str,
+    requested: &str,
+    runtime: &Runtime,
+) -> Result<String, String> {
+    if !model.quantized {
+        return Ok(requested.to_owned());
+    }
+    let bf16 = runtime
+        .precisions
+        .get(device)
+        .is_some_and(|p| p.iter().any(|p| p == "bf16"));
+    if device != "cuda" || !runtime.devices.iter().any(|d| d == "cuda") {
+        return Err("量子化版はNVIDIA GPU専用です。通常版を選ぶか、音声生成に使う機器をcudaにしてください。".into());
+    }
+    if !bf16 {
+        return Err("量子化版にはBF16対応のNVIDIA GPUが必要です。通常版を選んでください。".into());
+    }
+    if let Some(minimum) = model.min_cuda_capability
+        && runtime.cuda_capability.is_none_or(|have| have < minimum)
+    {
+        return Err(format!(
+            "{}にはAmpere以降（RTX 30シリーズ以降が目安）のNVIDIA GPUが必要です。INT8版または通常版を選んでください。",
+            model.label
+        ));
+    }
+    Ok("bf16".into())
+}
+
+/// Trims and checks a voice name.
+pub fn voice_name(raw: &str) -> Result<String, &'static str> {
     let name = raw.trim();
-    if name.is_empty() || name.chars().count() > 50 || name.chars().any(char::is_control) {
-        return Err("キャラクター名は1行・50文字までで入力してください。");
+    if name.is_empty() || name.chars().count() > 80 || name.chars().any(char::is_control) {
+        return Err("話者名を1行・1～80文字で入力してください。");
     }
     Ok(name.to_owned())
-}
-
-/// Most lines one batch may queue.
-pub const MAX_BATCH_LINES: usize = 100;
-
-/// The character a generation belongs to: set when every reference used shares one name.
-pub fn shared_character(characters: &[Option<String>]) -> Option<String> {
-    let first = characters.first()?.as_ref()?;
-    characters
-        .iter()
-        .all(|c| c.as_ref() == Some(first))
-        .then(|| first.clone())
-}
-
-/// Splits batch input into one line per generation, skipping blank lines.
-pub fn batch_lines(raw: &str) -> Result<Vec<String>, String> {
-    let lines: Vec<String> = raw
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .map(str::to_owned)
-        .collect();
-    if lines.is_empty() {
-        return Err("台詞を1行以上入力してください。".into());
-    }
-    if lines.len() > MAX_BATCH_LINES {
-        return Err(format!("一度に生成できるのは{MAX_BATCH_LINES}行までです。"));
-    }
-    if lines.iter().any(|l| l.chars().count() > MAX_TEXT_CHARS) {
-        return Err(format!("1行は{MAX_TEXT_CHARS}文字までです。"));
-    }
-    Ok(lines)
 }
 
 /// Puts bf16 first wherever a device offers it, making it the default precision.
@@ -434,6 +521,7 @@ mod tests {
             .into_iter()
             .collect(),
             max_candidates: 32,
+            cuda_capability: Some((8, 6)),
         }
     }
 
@@ -447,23 +535,23 @@ mod tests {
     fn rejects(change: impl FnOnce(&mut GenerateRequest)) {
         let mut req = request();
         change(&mut req);
-        assert!(req.validate(&runtime()).is_err(), "accepted {req:?}");
+        assert!(req.validate(&runtime(), 1).is_err(), "accepted {req:?}");
     }
 
     #[test]
     fn defaults_are_valid() {
-        assert_eq!(request().validate(&runtime()), Ok(()));
+        assert_eq!(request().validate(&runtime(), 0), Ok(()));
     }
 
     #[test]
     fn rejects_blank_text_and_missing_references() {
         rejects(|r| r.text = " \n".into());
-        rejects(|r| r.mode = "clone".into());
-        rejects(|r| r.mode = "both".into());
-        let mut ok = request();
-        ok.mode = "clone".into();
-        ok.reference_ids = vec![1];
-        assert_eq!(ok.validate(&runtime()), Ok(()));
+        for mode in ["clone", "both"] {
+            let mut req = request();
+            req.mode = mode.into();
+            assert!(req.validate(&runtime(), 0).is_err(), "{mode}");
+            assert_eq!(req.validate(&runtime(), 1), Ok(()), "{mode}");
+        }
     }
 
     #[test]
@@ -481,8 +569,11 @@ mod tests {
         rejects(|r| r.speed = 0.7);
         rejects(|r| r.speed = 1.55);
         rejects(|r| r.speed = f64::NAN);
-        rejects(|r| r.num_steps = 0);
-        rejects(|r| r.num_steps = 121);
+        rejects(|r| r.silence = -0.1);
+        rejects(|r| r.silence = 10.5);
+        rejects(|r| r.silence = f64::NAN);
+        rejects(|r| r.num_steps = Some(0));
+        rejects(|r| r.num_steps = Some(121));
         rejects(|r| r.num_candidates = 0);
         rejects(|r| r.num_candidates = 33);
         rejects(|r| r.duration_scale = 1.6);
@@ -494,11 +585,12 @@ mod tests {
         rejects(|r| r.reference_ids = vec![1; MAX_REFERENCES + 1]);
         let mut edge = request();
         edge.speed = 1.5;
-        edge.num_steps = 120;
+        edge.silence = 10.0;
+        edge.num_steps = Some(120);
         edge.num_candidates = 32;
         edge.model_device = "cuda".into();
         edge.model_precision = "bf16".into();
-        assert_eq!(edge.validate(&runtime()), Ok(()));
+        assert_eq!(edge.validate(&runtime(), 0), Ok(()));
     }
 
     #[test]
@@ -542,40 +634,105 @@ mod tests {
     }
 
     #[test]
-    fn character_names_are_trimmed_single_line_and_limited() {
-        assert_eq!(character_name("  ずんだ  "), Ok("ずんだ".to_owned()));
-        assert_eq!(character_name(&"あ".repeat(50)), Ok("あ".repeat(50)));
-        for bad in ["", "   ", "a\nb", "a\tb", &"あ".repeat(51)] {
-            assert!(character_name(bad).is_err(), "accepted {bad:?}");
+    fn blank_steps_take_the_model_default() {
+        let mut req = request();
+        assert_eq!(req.engine_params("a")["num_steps"], 40);
+        req.model = "Aratako/Irodori-TTS-v4.1-Small-MF".into();
+        assert_eq!(req.engine_params("a")["num_steps"], 4);
+        req.num_steps = Some(8);
+        assert_eq!(req.engine_params("a")["num_steps"], 8);
+    }
+
+    #[test]
+    fn every_model_has_one_entry_and_meanflow_runs_four_steps() {
+        let ids: std::collections::HashSet<_> = MODELS.iter().map(|m| m.id).collect();
+        assert_eq!(ids.len(), MODELS.len());
+        let mf = find_model("Aratako/Irodori-TTS-v4.1-Small-MF").unwrap();
+        assert!(mf.meanflow && mf.steps == 4);
+        assert!(find_model("nobody/model").is_none());
+    }
+
+    #[test]
+    fn quantized_models_resolve_to_bf16_on_capable_cuda_only() {
+        let int8 = find_model("Aratako/Irodori-TTS-v4-Large-Quantized/int8-weight-only").unwrap();
+        let int4 = find_model("Aratako/Irodori-TTS-v4-Large-Quantized/int4-weight-only").unwrap();
+        let large = find_model("Aratako/Irodori-TTS-v4-Large").unwrap();
+        let rt = runtime();
+        assert_eq!(
+            resolve_model_precision(int8, "cuda", "fp32", &rt),
+            Ok("bf16".into())
+        );
+        assert_eq!(
+            resolve_model_precision(int4, "cuda", "fp32", &rt),
+            Ok("bf16".into())
+        );
+        assert_eq!(
+            resolve_model_precision(large, "cpu", "fp32", &rt),
+            Ok("fp32".into()),
+            "unquantized models keep the request"
+        );
+        assert!(resolve_model_precision(int8, "cpu", "fp32", &rt).is_err());
+
+        let turing = Runtime {
+            cuda_capability: Some((7, 5)),
+            ..runtime()
+        };
+        assert_eq!(
+            resolve_model_precision(int8, "cuda", "fp32", &turing),
+            Ok("bf16".into())
+        );
+        assert!(resolve_model_precision(int4, "cuda", "fp32", &turing).is_err());
+        let unknown = Runtime {
+            cuda_capability: None,
+            ..runtime()
+        };
+        assert!(resolve_model_precision(int4, "cuda", "fp32", &unknown).is_err());
+
+        let no_bf16 = Runtime {
+            precisions: [("cuda".into(), vec!["fp32".into()])].into_iter().collect(),
+            ..runtime()
+        };
+        assert!(resolve_model_precision(int8, "cuda", "fp32", &no_bf16).is_err());
+        let cpu_only = Runtime {
+            devices: vec!["cpu".into()],
+            precisions: [("cpu".into(), vec!["fp32".into()])].into_iter().collect(),
+            max_candidates: 32,
+            cuda_capability: None,
+        };
+        assert!(resolve_model_precision(int8, "cpu", "fp32", &cpu_only).is_err());
+    }
+
+    #[test]
+    fn validation_settles_the_quantized_precision() {
+        let mut req = request();
+        req.model = "Aratako/Irodori-TTS-v4-Large-Quantized/int8-weight-only".into();
+        req.model_device = "cuda".into();
+        req.model_precision = "fp32".into();
+        assert_eq!(req.validate(&runtime(), 0), Ok(()));
+        assert_eq!(req.model_precision, "bf16");
+    }
+
+    #[test]
+    fn a_voice_sets_model_style_and_mode() {
+        let mut req = request();
+        req.reference_ids = vec![1];
+        req.voiced_by("Aratako/Irodori-TTS-v4.1-Small-MF", "明るく");
+        assert_eq!(
+            (req.model.as_str(), req.caption.as_str(), req.mode.as_str()),
+            ("Aratako/Irodori-TTS-v4.1-Small-MF", "明るく", "both")
+        );
+        assert!(req.reference_ids.is_empty());
+        req.voiced_by("Aratako/Irodori-TTS-v4.1-Small", " ");
+        assert_eq!(req.mode, "clone");
+    }
+
+    #[test]
+    fn voice_names_are_trimmed_single_line_and_limited() {
+        assert_eq!(voice_name("  ずんだ  "), Ok("ずんだ".to_owned()));
+        assert_eq!(voice_name(&"あ".repeat(80)), Ok("あ".repeat(80)));
+        for bad in ["", "   ", "a\nb", "a\tb", &"あ".repeat(81)] {
+            assert!(voice_name(bad).is_err(), "accepted {bad:?}");
         }
-    }
-
-    #[test]
-    fn a_character_is_recorded_only_when_all_references_share_it() {
-        let some = |s: &str| Some(s.to_owned());
-        assert_eq!(
-            shared_character(&[some("ずんだ"), some("ずんだ")]),
-            some("ずんだ")
-        );
-        assert_eq!(shared_character(&[some("ずんだ"), some("あかり")]), None);
-        assert_eq!(
-            shared_character(&[some("ずんだ"), None]),
-            None,
-            "an unnamed upload mixes voices"
-        );
-        assert_eq!(shared_character(&[]), None);
-    }
-
-    #[test]
-    fn batch_lines_are_trimmed_non_blank_and_limited() {
-        assert_eq!(
-            batch_lines(" おはよう \n\n\r\nこんにちは\r\n  "),
-            Ok(vec!["おはよう".to_owned(), "こんにちは".to_owned()])
-        );
-        assert!(batch_lines(" \n ").is_err(), "nothing to generate");
-        assert!(batch_lines(&"あ\n".repeat(MAX_BATCH_LINES)).is_ok());
-        assert!(batch_lines(&"あ\n".repeat(MAX_BATCH_LINES + 1)).is_err());
-        assert!(batch_lines(&"あ".repeat(MAX_TEXT_CHARS + 1)).is_err());
     }
 
     #[test]
@@ -627,7 +784,7 @@ mod tests {
             let params = req.engine_params("いろどり");
             assert_eq!(params["caption"], caption, "{mode}");
             assert_eq!(params["text"], "いろどり");
-            assert_eq!(params["checkpoint"], MODELS[0].0);
+            assert_eq!(params["checkpoint"], MODELS[0].id);
         }
     }
 

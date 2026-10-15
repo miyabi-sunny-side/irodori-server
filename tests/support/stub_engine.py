@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import sys
 import threading
+import time
 import wave
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -22,7 +23,7 @@ def tiny_wav():
         audio.setnchannels(1)
         audio.setsampwidth(2)
         audio.setframerate(8000)
-        audio.writeframes(b"\0\0" * 800)
+        audio.writeframes(b"\0\0" * 9600)  # 1.2 seconds: long enough to register as a voice
     return base64.b64encode(buffer.getvalue()).decode()
 
 
@@ -38,9 +39,11 @@ class Handler(BaseHTTPRequestHandler):
             reply |= {"ok": False, "error_type": "ValueError", "error": "bad", "trace": "Traceback: bad"}
         elif op == "generate":
             params = body["params"]
+            if params["text"] == "ゆっくり":
+                time.sleep(0.4)  # lets a test act while a generation is running
             if params["text"] == "落ちる":
                 return  # the connection closes without a reply, as when the engine dies
-            elif params["text"] == "失敗":
+            if params["text"] == "失敗":
                 reply |= {"ok": False, "error_type": "ValueError", "error": "seed must be an integer",
                           "trace": "Traceback: seed"}
             else:

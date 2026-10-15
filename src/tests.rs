@@ -197,15 +197,62 @@ async fn deleting_a_generation_removes_the_record_and_the_file() {
     assert_eq!(listed, json!({"generations": [], "file_errors": []}));
 }
 
+/// Uploads `bytes` as a reference and returns its id.
+async fn upload(server: &Server, name: &str, bytes: &[u8]) -> Response {
+    let boundary = "XBOUNDARY";
+    let mut body = format!(
+        "--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{name}\"\r\n\r\n"
+    )
+    .into_bytes();
+    body.extend(bytes);
+    body.extend(format!("\r\n--{boundary}--\r\n").as_bytes());
+    let request = Request::post("/api/references")
+        .header(
+            header::CONTENT_TYPE,
+            format!("multipart/form-data; boundary={boundary}"),
+        )
+        .body(Body::from(body))
+        .unwrap();
+    app(server.state.clone()).oneshot(request).await.unwrap()
+}
+
+/// A silent 16-bit mono WAV of the given length.
+fn wav(millis: u32) -> Vec<u8> {
+    let rate = 8000u32;
+    let frames = millis * rate / 1000;
+    let mut out = Vec::new();
+    out.extend(b"RIFF");
+    out.extend((36 + frames * 2).to_le_bytes());
+    out.extend(b"WAVEfmt ");
+    out.extend(16u32.to_le_bytes());
+    out.extend(1u16.to_le_bytes());
+    out.extend(1u16.to_le_bytes());
+    out.extend(rate.to_le_bytes());
+    out.extend((rate * 2).to_le_bytes());
+    out.extend(2u16.to_le_bytes());
+    out.extend(16u16.to_le_bytes());
+    out.extend(b"data");
+    out.extend((frames * 2).to_le_bytes());
+    out.resize(out.len() + frames as usize * 2, 0);
+    out
+}
+
+const MF: &str = "Aratako/Irodori-TTS-v4.1-Small-MF";
+
+async fn add_voice(server: &Server, body: Value) -> Response {
+    server.call("POST", "/api/voices", Some(body)).await
+}
+
 #[tokio::test]
-async fn a_generation_saved_as_a_reference_survives_bulk_deletion() {
+#[allow(clippy::too_many_lines)]
+async fn a_voice_from_the_history_fixes_model_style_and_reference() {
     let server = Server::new();
     let body = json_body(
         server
             .call(
                 "POST",
                 "/api/generate",
-                Some(json!({"text": "候補です。", "num_candidates": 3})),
+                Some(json!({"text": "候補です。", "caption": "明るい声", "num_candidates": 3})),
             )
             .await,
     )
@@ -217,175 +264,427 @@ async fn a_generation_saved_as_a_reference_survives_bulk_deletion() {
         .map(|g| g["id"].as_i64().unwrap())
         .collect();
 
-    let bad = server
-        .call(
-            "POST",
-            &format!("/api/generations/{}/reference", ids[1]),
-            Some(json!({"character": " "})),
+    for bad in [
+        json!({"name": " ", "model": MF, "generation_id": ids[1]}),
+        json!({"name": "a", "model": "nobody/model", "generation_id": ids[1]}),
+        json!({"name": "a", "model": MF}),
+        json!({"name": "a", "model": MF, "generation_id": ids[1], "reference_id": 1}),
+        json!({"name": "a", "model": MF, "generation_id": 9999}),
+    ] {
+        let response = add_voice(&server, bad.clone()).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{bad}");
+    }
+    let voice = json_body(
+        add_voice(
+            &server,
+            json!({"name": " ずんだ ", "model": MF, "caption": "明るく", "generation_id": ids[1]}),
         )
-        .await;
-    assert_eq!(bad.status(), StatusCode::BAD_REQUEST);
-    let reference = json_body(
-        server
-            .call(
-                "POST",
-                &format!("/api/generations/{}/reference", ids[1]),
-                Some(json!({"character": " ずんだ "})),
-            )
-            .await,
+        .await,
     )
     .await;
-    assert_eq!(reference["character"], "ずんだ");
-    let listed = json_body(server.call("GET", "/api/references", None).await).await;
-    assert_eq!(listed["references"].as_array().unwrap().len(), 1);
-    let saved_audio = server
-        .call("GET", reference["audio_url"].as_str().unwrap(), None)
+    assert_eq!(voice["name"], "ずんだ");
+    assert_eq!(voice["source_generation_id"], ids[1]);
+    let reference = server
+        .call("GET", voice["audio_url"].as_str().unwrap(), None)
         .await;
     assert!(
-        to_bytes(saved_audio.into_body(), usize::MAX)
+        to_bytes(reference.into_body(), usize::MAX)
             .await
             .unwrap()
             .starts_with(b"RIFF")
     );
 
     let cleaned = json_body(server.call("POST", "/api/generations/cleanup", None).await).await;
-    assert_eq!(cleaned["deleted"], 2);
+    assert_eq!(cleaned["deleted"], 2, "the voice's source is kept");
     let history = json_body(server.call("GET", "/api/generations", None).await).await;
-    assert_eq!(history["generations"].as_array().unwrap().len(), 1);
-    assert_eq!(history["generations"][0]["id"], ids[1]);
     assert_eq!(history["generations"][0]["saved"], true);
-    assert_eq!(
-        std::fs::read_dir(server.dir.path().join("data/audio"))
-            .unwrap()
-            .count(),
-        1
-    );
 
-    // The reference is a copy: deleting its source generation keeps it playable.
+    // The voice keeps its own copy, so it speaks after its source is deleted.
     server
         .call("DELETE", &format!("/api/generations/{}", ids[1]), None)
         .await;
-    let clone = server
+    let spoken = server
         .call(
             "POST",
-            "/api/generate",
-            Some(
-                json!({"text": "似せます。", "mode": "clone", "reference_ids": [reference["id"]]}),
-            ),
+            "/api/speech",
+            Some(json!({"voice_id": voice["id"], "text": "固定した声です。", "caption": "無視される"})),
         )
         .await;
-    assert_eq!(clone.status(), StatusCode::OK);
+    assert_eq!(spoken.status(), StatusCode::OK);
+    let id = spoken.headers()["x-generation-id"]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    let generation = json_body(
+        server
+            .call("GET", &format!("/api/generations/{id}"), None)
+            .await,
+    )
+    .await;
+    assert_eq!(generation["model"], MF);
+    assert_eq!(generation["caption"], "明るく");
+    assert_eq!(generation["mode"], "both");
+    assert_eq!(generation["character"], "ずんだ");
+    assert_eq!(generation["voice_id"], voice["id"]);
+    let log = generation["log"].as_str().unwrap();
+    assert!(
+        log.contains("\"num_steps\": 4"),
+        "MF runs its own steps: {log}"
+    );
+    assert!(log.contains("references: [[\"wav\", \"RIFF"), "{log}");
 
+    let stale = server
+        .call(
+            "PATCH",
+            &format!("/api/voices/{}", voice["id"]),
+            Some(json!({"name": "あかり", "revision": 0})),
+        )
+        .await;
+    assert_eq!(stale.status(), StatusCode::CONFLICT);
+    let renamed = json_body(
+        server
+            .call(
+                "PATCH",
+                &format!("/api/voices/{}", voice["id"]),
+                Some(json!({"name": "あかり", "revision": voice["revision"]})),
+            )
+            .await,
+    )
+    .await;
+    assert_eq!(
+        (renamed["name"].as_str(), renamed["model"].as_str()),
+        (Some("あかり"), Some(MF))
+    );
+
+    let deleted = server
+        .call("DELETE", &format!("/api/voices/{}", voice["id"]), None)
+        .await;
+    assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
     let restarted = server.restart();
-    let listed = json_body(call(&restarted, "GET", "/api/references", None).await).await;
-    assert_eq!(listed["references"][0]["character"], "ずんだ");
-    let deleted = call(
+    let voices = json_body(call(&restarted, "GET", "/api/voices", None).await).await;
+    assert_eq!(voices["voices"], json!([]));
+    let gone = call(
         &restarted,
-        "DELETE",
-        &format!("/api/references/{}", reference["id"]),
+        "POST",
+        "/api/speech",
+        Some(json!({"voice_id": voice["id"], "text": "a"})),
+    )
+    .await;
+    assert_eq!(gone.status(), StatusCode::BAD_REQUEST);
+    let played = call(
+        &restarted,
+        "GET",
+        &format!("/api/generations/{id}/audio"),
         None,
     )
     .await;
-    assert_eq!(deleted.status(), StatusCode::NO_CONTENT);
     assert_eq!(
-        std::fs::read_dir(server.dir.path().join("data/references"))
-            .unwrap()
-            .count(),
-        0
+        played.status(),
+        StatusCode::OK,
+        "history audio outlives the voice"
     );
 }
 
 #[tokio::test]
-async fn a_batch_voices_every_line_with_the_characters_references() {
+async fn an_uploaded_reference_registers_only_when_one_to_120_seconds_long() {
     let server = Server::new();
-    let body = json_body(
-        server
-            .call(
-                "POST",
-                "/api/generate",
-                Some(json!({"text": "お手本です。"})),
-            )
-            .await,
+    let mut ids = Vec::new();
+    for (name, bytes) in [
+        ("ok.wav", wav(1500)),
+        ("short.wav", wav(500)),
+        ("long.wav", wav(121_500)),
+        ("broken.wav", b"not audio".to_vec()),
+    ] {
+        let response = upload(&server, name, &bytes).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        ids.push(json_body(response).await["id"].clone());
+    }
+    let ok = add_voice(
+        &server,
+        json!({"name": "手元", "model": MF, "reference_id": ids[0]}),
     )
     .await;
-    let source = body["generations"][0]["id"].as_i64().unwrap();
-    let reference = json_body(
-        server
-            .call(
-                "POST",
-                &format!("/api/generations/{source}/reference"),
-                Some(json!({"character": "ずんだ"})),
-            )
-            .await,
-    )
-    .await;
+    assert_eq!(ok.status(), StatusCode::OK);
+    for id in &ids[1..] {
+        let refused = add_voice(
+            &server,
+            json!({"name": "x", "model": MF, "reference_id": id}),
+        )
+        .await;
+        assert_eq!(refused.status(), StatusCode::BAD_REQUEST, "{id}");
+    }
+    let voices = json_body(server.call("GET", "/api/voices", None).await).await;
+    assert_eq!(voices["voices"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        std::fs::read_dir(server.dir.path().join("data/voices"))
+            .unwrap()
+            .count(),
+        1,
+        "refused audio leaves no file"
+    );
+}
 
-    let missing = server
-        .call(
-            "POST",
-            "/api/batches",
-            Some(json!({"character": "だれ", "lines": "a"})),
-        )
-        .await;
-    assert_eq!(missing.status(), StatusCode::BAD_REQUEST);
-    let empty = server
-        .call(
-            "POST",
-            "/api/batches",
-            Some(json!({"character": "ずんだ", "lines": "\n \n"})),
-        )
-        .await;
-    assert_eq!(empty.status(), StatusCode::BAD_REQUEST);
+async fn script(server: &Server) -> Value {
+    json_body(server.call("GET", "/api/script", None).await).await
+}
 
-    let started = server
+async fn put_script(server: &Server, revision: &Value, cards: Value) -> Response {
+    server
         .call(
-            "POST",
-            "/api/batches",
-            Some(json!({"character": "ずんだ", "lines": "一行目\n落ちる\n\n三行目", "settings": {"num_steps": 4}})),
+            "PUT",
+            "/api/script",
+            Some(
+                json!({"revision": revision, "script": {"cards": cards, "options": {"txt": true}}}),
+            ),
         )
-        .await;
-    assert_eq!(started.status(), StatusCode::ACCEPTED);
-    let started = json_body(started).await;
-    assert_eq!(started["total"], 3);
-    let id = started["id"].as_str().unwrap().to_owned();
-    let batch = loop {
-        let batch = json_body(
-            server
-                .call("GET", &format!("/api/batches/{id}"), None)
-                .await,
-        )
-        .await;
-        if batch["finished"] == true {
-            break batch;
+        .await
+}
+
+/// Waits for the script's generation run to finish.
+async fn finished(server: &Server) -> Value {
+    loop {
+        let current = script(server).await;
+        if current["job"]["finished"] == true {
+            return current;
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    };
-    assert_eq!(batch["done"], 3);
-    assert_eq!(batch["generation_ids"].as_array().unwrap().len(), 2);
-    assert_eq!(
-        batch["failed"][0]["line"], "落ちる",
-        "a failed line does not stop the batch"
-    );
+    }
+}
 
-    let history = json_body(server.call("GET", "/api/generations", None).await).await;
-    let voiced: Vec<&Value> = history["generations"]
+async fn voice_from_history(server: &Server) -> i64 {
+    let body = json_body(
+        server
+            .call("POST", "/api/generate", Some(json!({"text": "声"})))
+            .await,
+    )
+    .await;
+    let voice = json_body(
+        add_voice(
+            server,
+            json!({"name": "ずんだ", "model": MF, "generation_id": body["generations"][0]["id"]}),
+        )
+        .await,
+    )
+    .await;
+    voice["id"].as_i64().unwrap()
+}
+
+fn statuses(script: &Value) -> Vec<&str> {
+    script["cards"]
         .as_array()
         .unwrap()
         .iter()
-        .filter(|g| g["character"] == "ずんだ")
-        .collect();
-    assert_eq!(voiced.len(), 2);
-    assert_eq!(voiced[0]["reference_ids"], json!([reference["id"]]));
-    assert_eq!(voiced[0]["mode"], "clone");
+        .map(|c| c["status"].as_str().unwrap())
+        .collect()
+}
+
+#[tokio::test]
+#[allow(clippy::too_many_lines)]
+async fn a_script_generates_its_cards_and_exports_them_in_order() {
+    let server = Server::new();
+    let first = script(&server).await;
+    assert_eq!(first["revision"], 1);
+    assert_eq!(statuses(&first), ["empty"]);
+    let voice = voice_from_history(&server).await;
+    let cards = json!([
+        {"id": "a", "text": "一行目", "voice_id": voice},
+        {"id": "b", "text": ""},
+        {"id": "c", "text": "落ちる", "voice_id": voice},
+        {"id": "d", "text": "四行目", "voice_id": voice, "speed": 1.25, "silence": 0.5},
+        {"id": "e", "text": "話者なし"},
+    ]);
+    let invalid = put_script(
+        &server,
+        &first["revision"],
+        json!([{"id": "a", "speed": 3}]),
+    )
+    .await;
+    assert_eq!(invalid.status(), StatusCode::BAD_REQUEST);
+    let saved = json_body(put_script(&server, &first["revision"], cards.clone()).await).await;
+    assert_eq!(saved["revision"], 2);
+    assert_eq!(statuses(&saved), ["new", "empty", "new", "new", "no_voice"]);
+    let stale = put_script(&server, &first["revision"], cards.clone()).await;
+    assert_eq!(
+        stale.status(),
+        StatusCode::CONFLICT,
+        "another screen saved first"
+    );
+
+    let missing_voice = server
+        .call(
+            "POST",
+            "/api/script/generate",
+            Some(json!({"revision": 2, "target": "changed"})),
+        )
+        .await;
+    assert_eq!(missing_voice.status(), StatusCode::BAD_REQUEST);
     assert!(
-        voiced[0]["log"]
+        json_body(missing_voice).await["error"]
             .as_str()
             .unwrap()
-            .contains("\"num_steps\": 4"),
-        "settings are applied"
+            .starts_with("5番")
     );
-    let listed = json_body(server.call("GET", "/api/batches", None).await).await;
-    assert_eq!(listed["batches"][0]["id"], id.as_str());
+    let mut cards = cards;
+    cards[4]["text"] = "".into();
+    let saved = json_body(put_script(&server, &saved["revision"], cards.clone()).await).await;
+    server
+        .call(
+            "POST",
+            "/api/script/generate",
+            Some(json!({"revision": saved["revision"], "target": "changed"})),
+        )
+        .await;
+    let done = finished(&server).await;
+    assert_eq!(
+        statuses(&done),
+        ["done", "empty", "failed", "done", "empty"]
+    );
+    assert_eq!(done["job"]["failed"], 1);
+    assert!(done["cards"][2]["error"].as_str().unwrap().contains("通信"));
+    let id = done["cards"][3]["generation_id"].as_i64().unwrap();
+    let generation = json_body(
+        server
+            .call("GET", &format!("/api/generations/{id}"), None)
+            .await,
+    )
+    .await;
+    assert_eq!(
+        generation["character"], "ずんだ",
+        "card audio is in the history"
+    );
+    assert!(
+        generation["log"]
+            .as_str()
+            .unwrap()
+            .contains("末尾の無音: 0.5秒")
+    );
+    let date: String = generation["created_at"]
+        .as_str()
+        .unwrap()
+        .chars()
+        .take(10)
+        .filter(|c| *c != '-')
+        .collect();
+    assert_eq!(
+        done["cards"][3]["download_name"],
+        format!("004_ずんだ_{date}.wav")
+    );
+
+    let refused = server.call("GET", "/api/script/playlist", None).await;
+    assert_eq!(refused.status(), StatusCode::CONFLICT);
+    assert!(
+        json_body(refused).await["error"]
+            .as_str()
+            .unwrap()
+            .contains("セリフ 3 ")
+    );
+    let from_d = json_body(
+        server
+            .call("GET", "/api/script/playlist?from=d", None)
+            .await,
+    )
+    .await;
+    assert_eq!(from_d["items"][0]["id"], "d");
+
+    // Editing a card's text marks it changed; restoring the text needs no regeneration.
+    cards[3]["text"] = "変えた".into();
+    let edited = json_body(put_script(&server, &done["revision"], cards.clone()).await).await;
+    assert_eq!(statuses(&edited)[3], "changed");
+    cards[2]["text"] = "".into();
+    cards[3]["text"] = "四行目".into();
+    let restored = json_body(put_script(&server, &edited["revision"], cards.clone()).await).await;
+    assert_eq!(
+        statuses(&restored),
+        ["done", "empty", "empty", "done", "empty"]
+    );
+    let playlist = json_body(server.call("GET", "/api/script/playlist", None).await).await;
+    let order: Vec<&str> = playlist["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(order, ["a", "d"]);
+
+    let joined = server
+        .call("GET", "/api/script/export?kind=wav", None)
+        .await;
+    assert_eq!(joined.status(), StatusCode::OK);
+    assert_eq!(joined.headers()[header::CONTENT_TYPE], "audio/wav");
+    let joined = to_bytes(joined.into_body(), usize::MAX).await.unwrap();
+    let seconds = crate::audio::wav_seconds(&joined).unwrap();
+    assert!(
+        (seconds - (1.2 + 1.2 / 1.25 + 0.5)).abs() < 0.05,
+        "{seconds}"
+    );
+
+    let zipped = server
+        .call("GET", "/api/script/export?kind=zip", None)
+        .await;
+    assert_eq!(zipped.headers()[header::CONTENT_TYPE], "application/zip");
+    let zipped = to_bytes(zipped.into_body(), usize::MAX).await.unwrap();
+    assert!(zipped.starts_with(b"PK"));
+    let listing = String::from_utf8_lossy(&zipped);
+    for name in [
+        format!("001_ずんだ_{date}.wav"),
+        format!("001_ずんだ_{date}.txt"),
+        format!("004_ずんだ_{date}.wav"),
+    ] {
+        assert!(listing.contains(&name), "{name}");
+    }
+    let unknown = server
+        .call("GET", "/api/script/export?kind=mp3", None)
+        .await;
+    assert_eq!(unknown.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn stopping_a_script_run_finishes_the_running_card_only() {
+    let server = Server::new();
+    let voice = voice_from_history(&server).await;
+    let current = script(&server).await;
+    let cards = json!([
+        {"id": "a", "text": "ゆっくり", "voice_id": voice},
+        {"id": "b", "text": "二", "voice_id": voice},
+        {"id": "c", "text": "三", "voice_id": voice},
+    ]);
+    let saved = json_body(put_script(&server, &current["revision"], cards).await).await;
+    let started = json_body(
+        server
+            .call(
+                "POST",
+                "/api/script/generate",
+                Some(json!({"revision": saved["revision"], "target": "all"})),
+            )
+            .await,
+    )
+    .await;
+    assert_eq!(statuses(&started), ["queued", "queued", "queued"]);
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert_eq!(statuses(&script(&server).await)[0], "running");
+    let busy = server
+        .call(
+            "POST",
+            "/api/script/generate",
+            Some(json!({"revision": saved["revision"], "target": "all"})),
+        )
+        .await;
+    assert_eq!(busy.status(), StatusCode::CONFLICT);
+    let stopping = json_body(server.call("POST", "/api/script/stop", None).await).await;
+    assert_eq!(statuses(&stopping), ["running", "new", "new"]);
+    let done = finished(&server).await;
+    assert_eq!(statuses(&done), ["done", "new", "new"]);
+    assert_eq!(done["job"]["done"], 1);
+
+    // The browser may close: a single card regenerates on its own.
+    server
+        .call(
+            "POST",
+            "/api/script/generate",
+            Some(json!({"revision": done["revision"], "target": "c"})),
+        )
+        .await;
+    assert_eq!(statuses(&finished(&server).await), ["done", "new", "done"]);
 }
 
 #[tokio::test]
@@ -645,6 +944,8 @@ async fn info_lists_models_and_grouped_emojis_from_the_engine() {
         info["models"][1]["id"],
         "phasefield-audio/Irodori-TTS-v4.1-Anime"
     );
+    assert_eq!(info["models"][2]["steps"], 4);
+    assert_eq!(info["models"][2]["meanflow"], true);
     assert_eq!(info["devices"], json!(["cpu"]));
     assert_eq!(info["max_candidates"], 4);
     assert_eq!(info["emoji_groups"][0]["title"], "ポジティブ");

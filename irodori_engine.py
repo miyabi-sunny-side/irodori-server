@@ -51,9 +51,12 @@ def decode_references(items):
 
 def info(upstream, _body):
     from irodori_tts.gradio_emoji_palette import EMOJI_PALETTE_ITEMS
+    import torch
     devices = upstream.list_available_runtime_devices()
+    capability = list(torch.cuda.get_device_capability()) if "cuda" in devices else None
     return {
         "devices": devices,
+        "cuda_capability": capability,
         "precisions": {device: upstream._precision_choices_for_device(device) for device in devices},
         "max_candidates": upstream.MAX_GRADIO_CANDIDATES,
         "emojis": [{"emoji": i.emoji, "label": i.label, "description": i.description} for i in EMOJI_PALETTE_ITEMS],

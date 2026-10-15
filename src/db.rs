@@ -1,4 +1,4 @@
-//! `SQLite` records for generations, reference audio and the reading dictionary.
+//! `SQLite` records for generations, voices, reference audio, the script and the reading dictionary.
 //! Paths are stored relative to the data directory; only the server writes here.
 
 use std::path::Path;
@@ -61,9 +61,48 @@ ALTER TABLE generations ADD COLUMN favorite INTEGER NOT NULL DEFAULT 0;
 PRAGMA user_version = 3;
 ";
 
-/// Bulk deletion keeps favourites and generations saved as references.
-const DELETABLE: &str = "favorite = 0 AND NOT EXISTS
-    (SELECT 1 FROM references_audio r WHERE r.source_generation_id = generations.id)";
+/// Version 4 (`EasyIrodoriTTS` v2.0): a voice fixes a name, model, speaking style and one reference.
+/// Character references become voices, taking the model and style of the generation they were
+/// saved from (the default model and no style without one); unnamed uploads stay references.
+/// The script lives in one row; each card's latest generation is kept beside it.
+const MIGRATE_V4: &str = "
+CREATE TABLE voices (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at TEXT NOT NULL,
+    name TEXT NOT NULL,
+    model TEXT NOT NULL,
+    caption TEXT NOT NULL,
+    path TEXT NOT NULL,
+    source_generation_id INTEGER,
+    revision INTEGER NOT NULL DEFAULT 1,
+    deleted INTEGER NOT NULL DEFAULT 0
+);
+INSERT INTO voices (created_at, name, model, caption, path, source_generation_id)
+    SELECT r.created_at, r.character, COALESCE(g.model, 'Aratako/Irodori-TTS-v4.1-Small'),
+        CASE WHEN g.mode IN ('design', 'both') THEN g.caption ELSE '' END,
+        r.path, r.source_generation_id
+    FROM references_audio r LEFT JOIN generations g ON g.id = r.source_generation_id
+    WHERE r.character IS NOT NULL ORDER BY r.id;
+DELETE FROM references_audio WHERE character IS NOT NULL;
+ALTER TABLE generations ADD COLUMN voice_id INTEGER;
+CREATE TABLE script (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    revision INTEGER NOT NULL,
+    doc TEXT NOT NULL
+);
+CREATE TABLE script_results (
+    card_id TEXT PRIMARY KEY,
+    generation_id INTEGER,
+    signature TEXT NOT NULL DEFAULT '',
+    error TEXT NOT NULL DEFAULT ''
+);
+PRAGMA user_version = 4;
+";
+
+/// Bulk deletion keeps favourites, generations registered as voices and script audio.
+const DELETABLE: &str = "favorite = 0
+    AND NOT EXISTS (SELECT 1 FROM voices v WHERE v.source_generation_id = generations.id AND v.deleted = 0)
+    AND NOT EXISTS (SELECT 1 FROM script_results s WHERE s.generation_id = generations.id)";
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Generation {
@@ -84,21 +123,45 @@ pub struct Generation {
     #[serde(skip)]
     pub path: String,
     pub audio_url: String,
-    /// Saved as a reference, so bulk deletion keeps it.
+    /// Registered as a voice, so bulk deletion keeps it.
     pub saved: bool,
+    /// The voice's name, for generations spoken by a registered voice.
     pub character: Option<String>,
+    pub voice_id: Option<i64>,
     /// Marked with ★, so bulk deletion keeps it.
     pub favorite: bool,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq)]
-pub struct Reference {
+pub struct Voice {
     pub id: i64,
     pub created_at: String,
     pub name: String,
-    pub character: Option<String>,
+    pub model: String,
+    pub caption: String,
     pub source_generation_id: Option<i64>,
+    /// Raised by renaming; a rename sent with an older revision is a conflict.
+    pub revision: i64,
     pub audio_url: String,
+    #[serde(skip)]
+    pub path: String,
+}
+
+/// Why a rename was not applied.
+#[derive(Debug, PartialEq)]
+pub enum Rename {
+    Missing,
+    Conflict,
+}
+
+/// A card's latest generation and the input it was made from.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct CardResult {
+    pub generation_id: Option<i64>,
+    /// The generation still exists.
+    pub audio: bool,
+    pub signature: String,
+    pub error: String,
 }
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -133,7 +196,7 @@ impl Db {
             tx.commit()?;
         }
         let version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
-        for (target, migration) in [(2, MIGRATE_V2), (3, MIGRATE_V3)] {
+        for (target, migration) in [(2, MIGRATE_V2), (3, MIGRATE_V3), (4, MIGRATE_V4)] {
             if version < target {
                 let tx = conn.transaction()?;
                 tx.execute_batch(migration)?;
@@ -181,25 +244,6 @@ impl Db {
         Ok(self.0.last_insert_rowid())
     }
 
-    /// Path and character name of a reference.
-    pub fn reference_entry(&self, id: i64) -> rusqlite::Result<Option<(String, Option<String>)>> {
-        self.0
-            .query_row(
-                "SELECT path, character FROM references_audio WHERE id = ?1",
-                [id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()
-    }
-
-    /// Saved references of one character, oldest first.
-    pub fn character_references(&self, character: &str) -> rusqlite::Result<Vec<i64>> {
-        let mut stmt = self
-            .0
-            .prepare("SELECT id FROM references_audio WHERE character = ?1 ORDER BY id")?;
-        stmt.query_map([character], |row| row.get(0))?.collect()
-    }
-
     pub fn set_favorite(&self, id: i64, favorite: bool) -> rusqlite::Result<bool> {
         Ok(self.0.execute(
             "UPDATE generations SET favorite = ?2 WHERE id = ?1",
@@ -224,8 +268,8 @@ impl Db {
         for row in rows {
             tx.execute(
                 "INSERT INTO generations (batch, candidate, created_at, text, text_applied, mode, caption,
-                 reference_ids, model, seed, speed, params, log, path, character)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                 reference_ids, model, seed, speed, params, log, path, character, voice_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
                 params![
                     row.batch,
                     row.candidate,
@@ -242,6 +286,7 @@ impl Db {
                     row.log,
                     row.path,
                     row.character,
+                    row.voice_id,
                 ],
             )?;
             let id = tx.last_insert_rowid();
@@ -285,44 +330,141 @@ impl Db {
             .optional()
     }
 
-    /// Records a copy of a generation's WAV as a named reference.
-    pub fn save_reference(
+    pub fn add_voice(
         &self,
-        character: &str,
-        source_generation_id: i64,
+        name: &str,
+        model: &str,
+        caption: &str,
         path: &str,
-    ) -> rusqlite::Result<Reference> {
-        let name = format!("生成 {source_generation_id}");
+        source_generation_id: Option<i64>,
+    ) -> rusqlite::Result<Voice> {
         self.0.execute(
-            "INSERT INTO references_audio (created_at, name, path, character, source_generation_id)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![now(), name, path, character, source_generation_id],
+            "INSERT INTO voices (created_at, name, model, caption, path, source_generation_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![now(), name, model, caption, path, source_generation_id],
         )?;
-        let id = self.0.last_insert_rowid();
-        self.0.query_row(
-            &format!("{SELECT_REFERENCE} WHERE id = ?1"),
-            [id],
-            reference_row,
-        )
+        Ok(self
+            .voice(self.0.last_insert_rowid())?
+            .expect("inserted above"))
     }
 
-    /// References saved from the history, grouped by character.
-    pub fn references(&self) -> rusqlite::Result<Vec<Reference>> {
-        let mut stmt = self.0.prepare(&format!(
-            "{SELECT_REFERENCE} WHERE character IS NOT NULL ORDER BY character, id"
-        ))?;
-        stmt.query_map([], reference_row)?.collect()
+    /// Registered voices, oldest first. Deleted voices are hidden.
+    pub fn voices(&self) -> rusqlite::Result<Vec<Voice>> {
+        let mut stmt = self
+            .0
+            .prepare(&format!("{SELECT_VOICE} WHERE deleted = 0 ORDER BY id"))?;
+        stmt.query_map([], voice_row)?.collect()
     }
 
-    /// Deletes a reference record and returns its file path for the caller to remove.
-    pub fn delete_reference(&self, id: i64) -> rusqlite::Result<Option<String>> {
+    pub fn voice(&self, id: i64) -> rusqlite::Result<Option<Voice>> {
         self.0
             .query_row(
-                "DELETE FROM references_audio WHERE id = ?1 RETURNING path",
+                &format!("{SELECT_VOICE} WHERE id = ?1 AND deleted = 0"),
                 [id],
-                |row| row.get(0),
+                voice_row,
             )
             .optional()
+    }
+
+    /// Renames a voice whose revision matches; only the name of a voice can change.
+    pub fn rename_voice(
+        &self,
+        id: i64,
+        name: &str,
+        revision: i64,
+    ) -> rusqlite::Result<Result<Voice, Rename>> {
+        let Some(voice) = self.voice(id)? else {
+            return Ok(Err(Rename::Missing));
+        };
+        if voice.revision != revision {
+            return Ok(Err(Rename::Conflict));
+        }
+        if voice.name != name {
+            self.0.execute(
+                "UPDATE voices SET name = ?2, revision = revision + 1 WHERE id = ?1",
+                params![id, name],
+            )?;
+        }
+        Ok(Ok(self.voice(id)?.expect("checked above")))
+    }
+
+    /// Hides a voice. Its reference stays on disk for generations already queued with it.
+    pub fn delete_voice(&self, id: i64) -> rusqlite::Result<bool> {
+        Ok(self.0.execute(
+            "UPDATE voices SET deleted = 1 WHERE id = ?1 AND deleted = 0",
+            [id],
+        )? > 0)
+    }
+
+    /// The script's revision and JSON, or `None` before one is stored.
+    pub fn script(&self) -> rusqlite::Result<Option<(i64, String)>> {
+        self.0
+            .query_row("SELECT revision, doc FROM script WHERE id = 1", [], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .optional()
+    }
+
+    /// Stores the script when `revision` is the stored one (0 before any) and returns the new
+    /// revision, or `None` when another edit came first.
+    pub fn put_script(&self, revision: i64, doc: &str) -> rusqlite::Result<Option<i64>> {
+        let changed = if revision == 0 {
+            self.0.execute(
+                "INSERT OR IGNORE INTO script (id, revision, doc) VALUES (1, 1, ?1)",
+                [doc],
+            )?
+        } else {
+            self.0.execute(
+                "UPDATE script SET revision = revision + 1, doc = ?2 WHERE id = 1 AND revision = ?1",
+                params![revision, doc],
+            )?
+        };
+        Ok((changed > 0).then_some(revision + 1))
+    }
+
+    /// The latest generation of every card that has one.
+    pub fn card_results(&self) -> rusqlite::Result<std::collections::HashMap<String, CardResult>> {
+        let mut stmt = self.0.prepare(
+            "SELECT s.card_id, s.generation_id, g.id IS NOT NULL, s.signature, s.error
+             FROM script_results s LEFT JOIN generations g ON g.id = s.generation_id",
+        )?;
+        stmt.query_map([], |row| {
+            Ok((
+                row.get(0)?,
+                CardResult {
+                    generation_id: row.get(1)?,
+                    audio: row.get(2)?,
+                    signature: row.get(3)?,
+                    error: row.get(4)?,
+                },
+            ))
+        })?
+        .collect()
+    }
+
+    /// Records a card's new audio and clears its error.
+    pub fn set_card_audio(
+        &self,
+        card_id: &str,
+        generation_id: i64,
+        signature: &str,
+    ) -> rusqlite::Result<()> {
+        self.0.execute(
+            "INSERT INTO script_results (card_id, generation_id, signature, error) VALUES (?1, ?2, ?3, '')
+             ON CONFLICT (card_id) DO UPDATE SET generation_id = ?2, signature = ?3, error = ''",
+            params![card_id, generation_id, signature],
+        )?;
+        Ok(())
+    }
+
+    /// Records a failed attempt, keeping the card's earlier audio.
+    pub fn set_card_error(&self, card_id: &str, error: &str) -> rusqlite::Result<()> {
+        self.0.execute(
+            "INSERT INTO script_results (card_id, error) VALUES (?1, ?2)
+             ON CONFLICT (card_id) DO UPDATE SET error = ?2",
+            params![card_id, error],
+        )?;
+        Ok(())
     }
 
     /// Deletes every generation that bulk deletion may remove and returns their file paths.
@@ -364,22 +506,25 @@ impl Db {
 const SELECT_GENERATION: &str =
     "SELECT id, batch, candidate, created_at, text, text_applied, mode, caption,
     reference_ids, model, seed, speed, params, log, path,
-    EXISTS (SELECT 1 FROM references_audio r WHERE r.source_generation_id = generations.id),
-    character, favorite
+    EXISTS (SELECT 1 FROM voices v WHERE v.source_generation_id = generations.id AND v.deleted = 0),
+    character, favorite, voice_id
     FROM generations";
 
-const SELECT_REFERENCE: &str =
-    "SELECT id, created_at, name, character, source_generation_id FROM references_audio";
+const SELECT_VOICE: &str =
+    "SELECT id, created_at, name, model, caption, source_generation_id, revision, path FROM voices";
 
-fn reference_row(row: &rusqlite::Row) -> rusqlite::Result<Reference> {
+fn voice_row(row: &rusqlite::Row) -> rusqlite::Result<Voice> {
     let id = row.get(0)?;
-    Ok(Reference {
+    Ok(Voice {
         id,
         created_at: row.get(1)?,
         name: row.get(2)?,
-        character: row.get(3)?,
-        source_generation_id: row.get(4)?,
-        audio_url: format!("/api/references/{id}/audio"),
+        model: row.get(3)?,
+        caption: row.get(4)?,
+        source_generation_id: row.get(5)?,
+        revision: row.get(6)?,
+        audio_url: format!("/api/voices/{id}/audio"),
+        path: row.get(7)?,
     })
 }
 
@@ -408,6 +553,7 @@ fn generation_row(row: &rusqlite::Row) -> rusqlite::Result<Generation> {
         saved: row.get(15)?,
         character: row.get(16)?,
         favorite: row.get(17)?,
+        voice_id: row.get(18)?,
     })
 }
 
@@ -450,7 +596,12 @@ mod tests {
             saved: false,
             character: None,
             favorite: false,
+            voice_id: None,
         }
+    }
+
+    fn open(dir: &tempfile::TempDir, name: &str) -> Db {
+        Db::open(&dir.path().join(name), &dir.path().join("none.json")).unwrap()
     }
 
     #[test]
@@ -564,47 +715,203 @@ mod tests {
         );
         assert_eq!(db.dictionary().unwrap(), vec![("a".into(), "b".into())]);
         assert!(
-            db.references().unwrap().is_empty(),
-            "unnamed uploads are not listed as saved references"
+            db.voices().unwrap().is_empty(),
+            "unnamed uploads are not voices"
         );
         let version: i64 =
             db.0.pragma_query_value(None, "user_version", |row| row.get(0))
                 .unwrap();
-        assert_eq!(version, 3);
+        assert_eq!(version, 4);
+    }
+
+    /// A version 3 database as the previous release left it.
+    fn version_3(path: &Path) {
+        let conn = Connection::open(path).unwrap();
+        conn.execute_batch(SCHEMA).unwrap();
+        conn.execute_batch(MIGRATE_V2).unwrap();
+        conn.execute_batch(MIGRATE_V3).unwrap();
+        conn.execute_batch(
+            "INSERT INTO generations (batch, candidate, created_at, text, text_applied, mode, caption,
+                reference_ids, model, seed, speed, params, log, path, character, favorite)
+             VALUES ('b', 1, 't', 'あ', 'あ', 'design', '明るい声', '[]',
+                'phasefield-audio/Irodori-TTS-v4.1-Anime', '1', 1.0, '{}', '', 'audio/b_01.wav', NULL, 0),
+                    ('b', 2, 't', 'い', 'い', 'clone', '使われない説明', '[1]',
+                'Aratako/Irodori-TTS-v4.1-Small', '2', 1.0, '{}', '', 'audio/b_02.wav', NULL, 1);
+             INSERT INTO references_audio (created_at, name, path, character, source_generation_id)
+             VALUES ('t1', 'up.wav', 'references/up.wav', NULL, NULL),
+                    ('t2', '生成 1', 'references/zunda.wav', 'ずんだ', 1),
+                    ('t3', '生成 2', 'references/zunda2.wav', 'ずんだ', 2),
+                    ('t4', '生成 9', 'references/gone.wav', 'あかり', 9);",
+        )
+        .unwrap();
     }
 
     #[test]
-    fn bulk_deletion_keeps_generations_saved_as_references() {
+    fn a_version_3_database_turns_character_references_into_voices() {
         let dir = tempfile::tempdir().unwrap();
-        let mut db =
-            Db::open(&dir.path().join("r.sqlite3"), &dir.path().join("none.json")).unwrap();
+        let db_path = dir.path().join("v3.sqlite3");
+        version_3(&db_path);
+        let db = Db::open(&db_path, &dir.path().join("none.json")).unwrap();
+        let voices: Vec<_> = db
+            .voices()
+            .unwrap()
+            .into_iter()
+            .map(|v| (v.name, v.model, v.caption, v.path, v.source_generation_id))
+            .collect();
+        assert_eq!(
+            voices,
+            [
+                (
+                    "ずんだ".into(),
+                    "phasefield-audio/Irodori-TTS-v4.1-Anime".into(),
+                    "明るい声".into(),
+                    "references/zunda.wav".into(),
+                    Some(1)
+                ),
+                (
+                    "ずんだ".into(),
+                    "Aratako/Irodori-TTS-v4.1-Small".into(),
+                    String::new(),
+                    "references/zunda2.wav".into(),
+                    Some(2)
+                ),
+                (
+                    "あかり".into(),
+                    "Aratako/Irodori-TTS-v4.1-Small".into(),
+                    String::new(),
+                    "references/gone.wav".into(),
+                    Some(9)
+                ),
+            ],
+            "the style of a clone generation was not used, and a lost source takes the defaults"
+        );
+        assert_eq!(
+            db.reference_path(1).unwrap(),
+            Some("references/up.wav".into()),
+            "uploads stay references"
+        );
+        assert_eq!(
+            db.reference_path(2).unwrap(),
+            None,
+            "no reference is kept twice"
+        );
+        let history = db.generations().unwrap();
+        assert_eq!(history.len(), 2);
+        assert!(
+            history.iter().all(|g| g.saved),
+            "registered generations stay protected"
+        );
+        assert!(history.iter().any(|g| g.favorite));
+    }
+
+    #[test]
+    fn bulk_deletion_keeps_voice_sources_and_script_audio() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = open(&dir, "r.sqlite3");
         let rows = db
-            .insert_generations(&[sample("b1", 1), sample("b1", 2), sample("b1", 3)])
+            .insert_generations(&[
+                sample("b1", 1),
+                sample("b1", 2),
+                sample("b1", 3),
+                sample("b1", 4),
+            ])
             .unwrap();
-        let reference = db
-            .save_reference("ずんだ", rows[1].id, "references/copy.wav")
+        let voice = db
+            .add_voice("ずんだ", "m", "明るく", "voices/a.wav", Some(rows[1].id))
             .unwrap();
-        assert_eq!(reference.character.as_deref(), Some("ずんだ"));
-        assert_eq!(reference.source_generation_id, Some(rows[1].id));
+        assert_eq!(voice.source_generation_id, Some(rows[1].id));
         assert!(db.generation(rows[1].id).unwrap().unwrap().saved);
+        db.set_card_audio("card", rows[2].id, "sig").unwrap();
 
         let removed = db.delete_unsaved_generations().unwrap();
         assert_eq!(
             removed,
-            vec!["audio/b1_01.wav".to_owned(), "audio/b1_03.wav".to_owned()]
+            vec!["audio/b1_01.wav".to_owned(), "audio/b1_04.wav".to_owned()]
         );
         let left: Vec<i64> = db.generations().unwrap().iter().map(|g| g.id).collect();
-        assert_eq!(left, vec![rows[1].id]);
-        assert_eq!(db.references().unwrap(), vec![reference.clone()]);
+        assert_eq!(left, vec![rows[2].id, rows[1].id]);
 
-        assert_eq!(
-            db.delete_reference(reference.id).unwrap(),
-            Some("references/copy.wav".into())
-        );
+        assert!(db.delete_voice(voice.id).unwrap());
+        assert!(!db.delete_voice(voice.id).unwrap());
         assert!(
             !db.generation(rows[1].id).unwrap().unwrap().saved,
-            "deleting the reference releases the generation"
+            "deleting the voice releases the generation"
         );
+    }
+
+    #[test]
+    fn voices_are_renamed_by_revision_and_hidden_when_deleted() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = open(&dir, "v.sqlite3");
+        let voice = db.add_voice("a", "m", "", "voices/a.wav", None).unwrap();
+        assert_eq!(voice.revision, 1);
+        let renamed = db.rename_voice(voice.id, "b", 1).unwrap().unwrap();
+        assert_eq!((renamed.name.as_str(), renamed.revision), ("b", 2));
+        assert_eq!(
+            db.rename_voice(voice.id, "c", 1).unwrap(),
+            Err(Rename::Conflict)
+        );
+        assert_eq!(
+            db.rename_voice(voice.id, "b", 2).unwrap().unwrap().revision,
+            2,
+            "an unchanged name keeps the revision"
+        );
+        assert!(db.delete_voice(voice.id).unwrap());
+        assert_eq!(db.voice(voice.id).unwrap(), None);
+        assert!(db.voices().unwrap().is_empty());
+        assert_eq!(
+            db.rename_voice(voice.id, "d", 2).unwrap(),
+            Err(Rename::Missing)
+        );
+    }
+
+    #[test]
+    fn the_script_is_stored_by_revision() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = open(&dir, "s.sqlite3");
+        assert_eq!(db.script().unwrap(), None);
+        assert_eq!(db.put_script(0, "{\"a\":1}").unwrap(), Some(1));
+        assert_eq!(db.put_script(0, "{}").unwrap(), None);
+        assert_eq!(db.put_script(1, "{\"a\":2}").unwrap(), Some(2));
+        assert_eq!(
+            db.put_script(1, "{}").unwrap(),
+            None,
+            "a stale edit conflicts"
+        );
+        assert_eq!(db.script().unwrap(), Some((2, "{\"a\":2}".into())));
+    }
+
+    #[test]
+    fn card_results_keep_the_last_audio_through_failures() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = open(&dir, "c.sqlite3");
+        let rows = db.insert_generations(&[sample("b1", 1)]).unwrap();
+        db.set_card_error("new", "失敗").unwrap();
+        db.set_card_audio("a", rows[0].id, "s1").unwrap();
+        db.set_card_error("a", "再生成の失敗").unwrap();
+        let results = db.card_results().unwrap();
+        assert_eq!(
+            results["new"],
+            CardResult {
+                generation_id: None,
+                audio: false,
+                signature: String::new(),
+                error: "失敗".into()
+            }
+        );
+        assert_eq!(
+            results["a"],
+            CardResult {
+                generation_id: Some(rows[0].id),
+                audio: true,
+                signature: "s1".into(),
+                error: "再生成の失敗".into()
+            }
+        );
+        db.set_card_audio("a", rows[0].id, "s2").unwrap();
+        assert_eq!(db.card_results().unwrap()["a"].error, "");
+        db.delete_generation(rows[0].id).unwrap();
+        assert!(!db.card_results().unwrap()["a"].audio);
     }
 
     #[test]

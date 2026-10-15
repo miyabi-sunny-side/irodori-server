@@ -3,7 +3,7 @@
 # Usage: ./irodori.sh [--backend auto|cu128|cpu|xpu]   Env: IRODORI_BACKEND (auto)
 set -euo pipefail
 
-REVISION=8224dafb46d0aba89209a8f905f1cb7e3299d9c1
+REVISION=89f9d8fbd4d51ea019867ee1197725ede1df13c5
 UPSTREAM=https://github.com/Aratako/Irodori-TTS.git
 
 # select_backend REQUESTED SAVED GPU_FOUND(0|1)
