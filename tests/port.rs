@@ -20,7 +20,7 @@ impl Drop for Server {
 }
 
 fn command() -> (Command, tempfile::TempDir) {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().expect("the test needs a writable temporary directory");
     let mut command = Command::new(env!("CARGO_BIN_EXE_irodori-server"));
     command
         .env_remove("PORT")
