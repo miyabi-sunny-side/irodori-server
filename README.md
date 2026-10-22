@@ -158,16 +158,26 @@ v2.0 の通常版と Large 版は別の配布物ですが、話者ごとにモ�
 
 ## 開発
 
+commit の前に、手元で次をすべて通します。GitHub Actions では検査・テストを走らせません。
+
 ```sh
+npm --prefix client ci
+npm --prefix client run format:check
+npm --prefix client run check
+npm --prefix client test
+npm --prefix client run test:e2e  # 初回は npx --prefix client playwright install chromium
+npm --prefix client run build
+npm --prefix client run lint:design
+shellcheck -x irodori.sh tests/launcher_test.sh
 bash tests/launcher_test.sh
 python3 -m unittest tests/engine_test.py
-cargo test
-npm --prefix client test
-npm --prefix client run test:e2e
+cargo fmt --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --locked
 ```
 
 Rust のテストは推論エンジンの代わりに同じ HTTP 契約の `tests/support/stub_engine.py` を使うため、`python3` が要ります。
-モデルや GPU は要りません。
+話者の音声の変換と台本の書き出しを確かめるテストには `ffmpeg` が要ります。モデルや GPU は要りません。
 
 ## ライセンスとクレジット
 
